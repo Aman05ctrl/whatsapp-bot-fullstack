@@ -9,7 +9,7 @@
  import { Building2, Loader2, AlertCircle } from 'lucide-react';
  
  export default function Register() {
-   const [companyName, setCompanyName] = useState('');
+   const [fullName, setFullName] = useState('');
    const [email, setEmail] = useState('');
    const [password, setPassword] = useState('');
    const [confirmPassword, setConfirmPassword] = useState('');
@@ -28,15 +28,15 @@
        return;
      }
  
-     if (password.length < 8) {
-       setLocalError('Password must be at least 8 characters');
+     if (password.length < 6) {
+       setLocalError('Password must be at least 6 characters');
        return;
      }
  
      setIsSubmitting(true);
  
      try {
-       await register(email, password, companyName);
+       await register(email, password, fullName || undefined);
        navigate('/dashboard', { replace: true });
      } catch {
        // Error is handled by context
@@ -73,17 +73,16 @@
                )}
  
                <div className="space-y-2">
-  <Label htmlFor="companyName">Company Name</Label>
-  <Input
-    id="companyName"
-    type="text"
-    placeholder="ABC Real Estate"
-    value={companyName}
-    onChange={(e) => setCompanyName(e.target.value)}
-    required
-    autoComplete="organization"
-  />
-</div>
+                 <Label htmlFor="fullName">Full Name (optional)</Label>
+                 <Input
+                   id="fullName"
+                   type="text"
+                   placeholder="John Doe"
+                   value={fullName}
+                   onChange={(e) => setFullName(e.target.value)}
+                   autoComplete="name"
+                 />
+               </div>
  
                <div className="space-y-2">
                  <Label htmlFor="email">Email</Label>

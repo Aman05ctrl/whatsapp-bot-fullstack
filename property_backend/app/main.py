@@ -5,9 +5,10 @@ from property_backend.app.database import engine, Base
 
 # Import models to register them with Base
 from property_backend.app.models import property  # noqa: F401
+from property_backend.app.models import crm  # noqa: F401
 
 # Import routers
-from property_backend.app.routes import auth, properties, images, bot
+from property_backend.app.routes import auth, properties, images, bot, crm
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -45,3 +46,4 @@ app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(properties.router, prefix="/api/properties", tags=["Properties"])
 app.include_router(images.router, prefix="/api/properties", tags=["Images"])
 app.include_router(bot.router, prefix="/api/bot", tags=["Bot"])
+app.include_router(crm.router, prefix="/api/crm", tags=["CRM"])

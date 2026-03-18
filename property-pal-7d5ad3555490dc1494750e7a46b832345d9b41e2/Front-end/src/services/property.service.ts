@@ -6,7 +6,7 @@ export const PropertyService = {
 
   async getAll(params: Record<string, unknown> = {}): Promise<PaginatedDTO<PropertyDTO>> {
     const backendResponse = await api.properties.list(params);
-    return PropertyAdapter.toPaginatedDTO(backendResponse);
+    return { items: backendResponse.items, total: backendResponse.total };
   },
 
   async getById(id: string): Promise<PropertyDTO> {

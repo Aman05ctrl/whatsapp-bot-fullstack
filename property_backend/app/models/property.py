@@ -65,10 +65,20 @@ class Property(Base):
     
     # Investment details
     expected_roi = Column(Float, nullable=True)  # in percentage
+    currency = Column(String(10), default='AED', nullable=False, server_default='AED')
     
     # Property specifications
     property_type = Column(Enum(PropertyType), nullable=False, index=True)
     bhk = Column(Integer, nullable=True)  # Null for plots/commercial
+    bedrooms = Column(Integer, nullable=True)
+    bathrooms = Column(Float, nullable=True)
+    address = Column(String(500), nullable=True)
+    state = Column(String(100), nullable=True)
+    zip_code = Column(String(20), nullable=True)
+    kitchen = Column(Integer, nullable=True)
+    dining_hall = Column(Integer, nullable=True)
+    hall = Column(Integer, nullable=True)
+    terrace = Column(Boolean, default=False, nullable=True)
     description = Column(Text, nullable=True)
     
     # Status tracking
