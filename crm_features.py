@@ -61,7 +61,13 @@ def get_sheets_client():
             if _SHEETS_CLIENT is None:  # Double-check
                 try:
                     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-                    creds = Credentials.from_service_account_file('google_key.json', scopes=scope)
+                    google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+                    if google_creds_json:
+                        import json as _json
+                        creds_dict = _json.loads(google_creds_json)
+                        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+                    else:
+                        creds = Credentials.from_service_account_file('google_key.json', scopes=scope)
                     _SHEETS_CLIENT = gspread.authorize(creds)
                     safe_log_info("[SHEETS] Client initialized")
                 except Exception as e:
