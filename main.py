@@ -178,16 +178,10 @@ def send_slack_alert(message: str):
 # ENVIRONMENT VARIABLES
 # ============================================================================
 DEMO_MODE = True
-DEMO_MAX_AI_CALLS_PER_USER = 50
+DEMO_MAX_AI_CALLS_PER_USER = 3
 DEMO_SESSION_TIMEOUT = 1800
-USE_CLAWDBOT = True
 
 app = Flask(__name__)
-
-@app.after_request
-def add_ngrok_header(response):
-    response.headers['ngrok-skip-browser-warning'] = 'true'
-    return response
 
 WHATSAPP_TOKEN = os.getenv('WHATSAPP_TOKEN')
 PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID')
@@ -257,117 +251,6 @@ try:
         PROPERTIES = json.load(f)
 except Exception:
     PROPERTIES = []
-
-
-BOT_AUTH_TOKEN = None
-
-def _get_best_image_url(images):
-    """Get best image URL, converting to jpg/png via Cloudinary if needed"""
-    if not images:
-        return 'https://images.unsplash.com/photo-1512453979798-5ea904ac6605?q=80&w=1000'
-    
-    # Prefer jpg/png first (WhatsApp supports both)
-    for img in images:
-        url = img['image_url']
-        if url.endswith('.jpg') or url.endswith('.jpeg') or url.endswith('.png'):
-            return url
-    
-    # Convert webp/other cloudinary URLs to jpg
-    for img in images:
-        url = img['image_url']
-        if 'cloudinary.com' in url:
-            return url.replace('/upload/', '/upload/f_jpg,q_90/')
-    
-    # Fallback to first image as-is
-    return images[0]['image_url']
-
-def _get_all_image_urls(images):
-    """Get all image URLs - primary first, then rest in upload order, all converted to jpg/png"""
-    if not images:
-        return ['https://images.unsplash.com/photo-1512453979798-5ea904ac6605?q=80&w=1000']
-    
-    def convert_url(url):
-        if url.endswith('.jpg') or url.endswith('.jpeg') or url.endswith('.png'):
-            return url
-        if 'cloudinary.com' in url:
-            return url.replace('/upload/', '/upload/f_jpg,q_90/')
-        return url
-    
-    # Sort: primary first, then by created_at order
-    primary = [img for img in images if img.get('is_primary')]
-    rest = [img for img in images if not img.get('is_primary')]
-    
-    ordered = primary + rest
-    return [convert_url(img['image_url']) for img in ordered]
-
-def fetch_properties_from_backend():
-        """Fetch properties from backend API using bot account credentials"""
-        global PROPERTIES, BOT_AUTH_TOKEN
-        try:
-            backend_url = os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')
-            email = os.getenv('BOT_CLIENT_EMAIL')
-            password = os.getenv('BOT_CLIENT_PASSWORD')
-
-            if not email or not password:
-                safe_log_error("[PROPERTIES] BOT_CLIENT_EMAIL or BOT_CLIENT_PASSWORD not set in .env")
-                return
-
-            # Login to get token
-            login_resp = requests.post(
-                f"{backend_url}/api/auth/login",
-                json={"email": email, "password": password},
-                timeout=10
-            )
-            if login_resp.status_code != 200:
-                safe_log_error(f"[PROPERTIES] Login failed: {login_resp.status_code} | {login_resp.text[:100]}")
-                return
-
-            BOT_AUTH_TOKEN = login_resp.json().get("access_token")
-            if not BOT_AUTH_TOKEN:
-                safe_log_error("[PROPERTIES] No access_token in login response")
-                return
-
-            # Fetch properties
-            props_resp = requests.get(
-            f"{backend_url}/api/properties/?status=active&size=50",
-                headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                timeout=10
-            )
-            if props_resp.status_code != 200:
-                safe_log_error(f"[PROPERTIES] Fetch failed: {props_resp.status_code}")
-                return
-
-            data = props_resp.json()
-            raw_props = data.get('properties') or data.get('items') or []
-
-            # Normalize to bot format
-            PROPERTIES = []
-            for p in raw_props:
-                PROPERTIES.append({
-                    'name': p.get('title', 'Property'),
-                    'location': ', '.join(filter(None, [
-                        p.get('address', ''),
-                        p.get('city', ''),
-                        p.get('state', ''),
-                        p.get('zip_code', '')
-                    ])),
-                    'currency': p.get('currency', 'AED'),
-                    'price_aed': f"{p.get('price', 0):,.0f}",
-                    'roi': f"{p.get('expected_roi')}%" if p.get('expected_roi') else None,
-                    'image_url': _get_best_image_url(p.get('images', [])),
-                    'all_images': _get_all_image_urls(p.get('images', [])),
-                    'bedrooms': p.get('bedrooms') or p.get('bhk'),
-                    'bathrooms': p.get('bathrooms'),
-                    'area': p.get('area_sqft') or p.get('area'),
-                    'property_type': p.get('property_type', ''),
-                    'emi_available': p.get('emi_available', False),
-                    'description': p.get('description', ''),
-                })
-
-            safe_log_info(f"[PROPERTIES] ✅ Loaded {len(PROPERTIES)} properties for {email}")
-
-        except Exception as e:
-            safe_log_error(f"[PROPERTIES] Error: {e}")
 
 # ============================================================================
 # WEBHOOK MESSAGE QUEUE (FIXED ISSUES 1 & 3)
@@ -676,32 +559,6 @@ class WebhookProcessor:
             
             # Single sheet lookup
             user_data = get_user_data_once(msg.sender_id)
-
-            # Load returning user data from database if state is empty
-            if not conversation_state.get(msg.sender_id, 'city') and BOT_AUTH_TOKEN:
-                try:
-                    existing = requests.get(
-                        f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/leads?phone={msg.sender_id}",
-                        headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                        timeout=5
-                    )
-                    if existing.status_code == 200:
-                        existing_leads = existing.json()
-                        if existing_leads:
-                            lead = existing_leads[0]
-                            if lead.get('city'):
-                                conversation_state.update(msg.sender_id, 'city', lead['city'])
-                            if lead.get('email'):
-                                conversation_state.update(msg.sender_id, 'email', lead['email'])
-                                conversation_state.mark_email_asked(msg.sender_id)
-                            if lead.get('interest'):
-                                conversation_state.update(msg.sender_id, 'interest', lead['interest'])
-                            if lead.get('budget_category'):
-                                conversation_state.update(msg.sender_id, 'budget', lead['budget_category'])
-                            safe_log_info(f"[STATE] ✅ Restored state for returning user {msg.sender_id[-4:]}")
-                except Exception as e:
-                    safe_log_error(f"[STATE] Restore error: {e}")
-
             # Extract email
             email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
             email_match = re.search(email_pattern, msg.text_body)
@@ -725,16 +582,16 @@ class WebhookProcessor:
             )
             
             # Extract city
-            # Dynamic city detection from PROPERTIES database + common cities
-            db_cities = list(set([p['location'].split()[0].lower() for p in PROPERTIES if p['location'].strip()]))
-            all_cities = db_cities + ["dubai", "marina", "downtown", "meydan", "abudhabi", "yas", "uk", "london", "manchester", "delhi", "kanpur", "mumbai", "bangalore"]
+            demo_cities = ["dubai", "marina", "downtown", "meydan", "abudhabi", 
+                          "yas", "uk", "london", "manchester"]
             user_city = "Not Mentioned"
-            for city in all_cities:
-                if city and city in msg.text_body.lower():
+            for city in demo_cities:
+                if city in msg.text_body.lower():
                     user_city = city.title()
                     break
+            
             if user_city == "Not Mentioned":
-                user_city = conversation_state.get(msg.sender_id, 'city') or user_data.get('city', 'Not Mentioned')
+                user_city = user_data.get('city', 'Not Mentioned')
             
             # Extract interest
             user_interest = "Not Specified"
@@ -780,52 +637,7 @@ class WebhookProcessor:
                 msg.sender_id, msg.user_name, user_email, user_city, user_interest,
                 msg.text_body, message_count, user_budget, user_data.get('row_num'), correlation_id=corr_id, user_fingerprint=user_fingerprint
             )
-            
-            
-            # Write lead to database
-            try:
-                db_lead_data = {
-                    "name": msg.user_name or "Unknown",
-                    "phone": msg.sender_id,
-                    "city": user_city if user_city != "Not Mentioned" else None,
-                    "interest": user_interest if user_interest != "Not Specified" else None,
-                    "email": user_email if user_email != "Not Provided" else None,
-                    "budget_category": user_budget if user_budget != "Not Specified" else None,
-                    "lead_score": min(100, message_count * 10),
-                    "conversation_status": "active",
-                    "user_fingerprint": user_fingerprint,
-                }
-                # Check if lead exists first
-                existing = requests.get(
-                    f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/leads?phone={msg.sender_id}",
-                    headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                    timeout=5
-                )
-                existing_leads = existing.json() if existing.status_code == 200 else []
-                if existing_leads:
-                    # Update existing lead
-                    lead_id = existing_leads[0]['id']
-                    db_resp = requests.put(
-                        f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/leads/{lead_id}",
-                        json=db_lead_data,
-                        headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                        timeout=5
-                    )
-                else:
-                    # Create new lead
-                    db_resp = requests.post(
-                        f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/leads",
-                        json=db_lead_data,
-                        headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                        timeout=5
-                    )
-                if db_resp.status_code not in (200, 201):
-                    safe_log_error(f"[DB-LEAD] Failed: {db_resp.status_code}")
-                else:
-                    safe_log_info(f"[DB-LEAD] ✅ Saved | {corr_id}")
-            except Exception as e:
-                safe_log_error(f"[DB-LEAD] Error: {e}")
-            
+
             # Check handover
             cumulative_score = sum([
                 10 if user_city != "Not Mentioned" else 0,
@@ -843,193 +655,133 @@ class WebhookProcessor:
                 msg.sender_id, cumulative_score, has_email, has_city,
                 has_interest, msg.text_body
             )
-            # Don't auto-handover here — let AI decide when to handover
             
-            # ══════════════════════════════════════════════════════════
-            # AI IS THE BOSS — decides every action
-            # ══════════════════════════════════════════════════════════
-
-            # Rate limit check
-            if user_rate_limiter.is_rate_limited(msg.sender_id):
-                safe_log_warning(f"[RATE-LIMIT] {msg.sender_id[-4:]} | {corr_id}")
-                send_whatsapp_text_with_retry(msg.sender_id, "Please wait a moment. 😊", correlation_id=corr_id)
+            if should_handover and not handovermanager.is_handed_over(msg.sender_id):
+                handovermanager.record_handover(msg.sender_id)
+                handover_message = handovermanager.get_handover_message(handover_reason)
+                
+                send_whatsapp_text_with_retry(msg.sender_id, handover_message, correlation_id=corr_id)
+                safe_log_info(f"[HANDOVER] {msg.sender_id[-4:]} → {handover_reason}")
                 return
-
-            # Build resume block if returning user
-            resume_context_block = ""
+            
+            # Generate response
+            # ✅ FIX: Skip templates if AI resume forced
+           # AFTER — replace with this clean block:
+            # Generate response — 100% AI, no templates
             resume_context_json = conversation_state.get(msg.sender_id, 'resume_context')
+            prompt = None
+
             if resume_context_json and str(resume_context_json).strip() and resume_context_json != 'null':
                 try:
-                    rc = json.loads(resume_context_json)
-                    if isinstance(rc, dict) and rc.get('is_old_user') == True:
-                        summary = rc.get('summary', '')
-                        if summary:
-                            resume_context_block = f"\n- Previous interaction: {summary}\n- RETURNING user — greet warmly by name."
+                    resume_ctx = json.loads(resume_context_json)
+                    summary = resume_ctx.get('summary', 'previous inquiry')
+                    missing = resume_ctx.get('missing_fields', [])
+                    days_inactive = resume_ctx.get('days_inactive', 0)
+                    try:
+                        days = int(float(days_inactive))
+                    except (TypeError, ValueError):
+                        days = 0
+                    missing_str = missing[0] if isinstance(missing, list) and missing else 'none'
+                    user_data_str = resume_ctx.get('user_data', {})
+                    user_name_from_ctx = user_data_str.get('name', msg.user_name) if isinstance(user_data_str, dict) else msg.user_name
+                    prompt = f"""You are Sarah, a Dubai property consultant. This is {user_name_from_ctx}, a RETURNING client after {days} days.
+Previous interaction: {summary}
+Their message today: "{msg.text_body}"
+Instructions:
+1. Welcome them back warmly (use their name if greeting)
+2. Briefly acknowledge their previous interest
+3. If missing info is '{missing_str}' and not 'none', ask for it ONCE politely
+4. If they decline sharing info, accept gracefully: "No problem! Let me help you anyway."
+5. Keep response under 3 sentences, natural tone
+CRITICAL: If they refuse info, DO NOT ask again. Move conversation forward."""
                     conversation_state.update(msg.sender_id, 'resume_context', None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    safe_log_error(f"[RESUME] Prompt build failed: {e}")
+                    prompt = None
 
-            ai_prompt = f"""You are Sarah, a warm WhatsApp property consultant for Dubai, Abu Dhabi and UK real estate.
+            if prompt is None:
+                prompt = f"""You are Sarah, a warm and professional WhatsApp property consultant for UAE and UK real estate.
 
-CONVERSATION CONTEXT:
-- User name: {msg.user_name}
-- City interest: {user_city}
-- Budget preference: {user_interest}
-- Specific budget: {user_budget}
-- Email collected: {user_email}
-- Message number: {message_count}{resume_context_block}
-- User message: "{msg.text_body}"
-- Available properties in database: {[p['name'] + ' in ' + p['location'] + ' | type:' + p['property_type'] + ' | price:' + str(p['price_aed']) + ' | has_images:True' for p in PROPERTIES]}
-- IMPORTANT: You DO have property photos. Always use send_properties when user asks for photos/images/show me.
-- IMPORTANT: message_count is {message_count}. If message_count > 1, do NOT greet again. Continue the conversation naturally based on what user just said.
+User name: {msg.user_name}
+City interest: {user_city}
+Budget: {user_budget}
+Interest type: {user_interest}
+Email collected: {user_email}
+Message number: {message_count}
+Available properties: {[p['name'] + ' in ' + p['location'] + ' | ' + str(p['price_aed']) + ' ' + p.get('currency','AED') for p in PROPERTIES]}
+User message: "{msg.text_body}"
 
-AVAILABLE ACTIONS (pick ONE):
-- "send_text"       → reply with text only
-- "send_properties" → reply + send property images. Use this when:
-                      * user asks to "show", "see", "view", "photos", "pictures", "details"
-                      * user says "yes", "sure", "ok", "interested" after you mentioned a property
-                      * user asks about a specific city/type you have in database
-                      * ANY sign of interest in seeing properties — BE AGGRESSIVE with this action
-- "ask_email"       → reply that also asks for email (ONLY if email is "Not Provided" AND message_count >= 3)
-- "handover"        → transfer to human agent (ONLY if user wants to buy, book, or meet agent)
+RULES:
+1. Reply in 2-3 short sentences max, warm WhatsApp style
+2. No bullet points, no markdown, no asterisks
+3. Max 2 emojis
+4. If user asks to see properties/photos, end your reply with: SHOW_PHOTO: CityName
+5. Never greet again if message_count > 1
+6. Always end with a natural question or next step"""
 
-IMPORTANT: When user says yes/sure/ok/interested after property mention → ALWAYS use "send_properties" not "send_text"
-
-STRICT RULES:
-1. Return ONLY valid JSON — no extra text, no markdown, no backticks
-2. reply_text: human, warm, WhatsApp style — max 2-3 short sentences
-3. No bullet points, asterisks, or markdown in reply_text
-4. Max 1-2 emojis in reply_text
-5. Never write long paragraphs
-6. End reply_text with one natural question or next step
-7. include_roi: true ONLY if user explicitly asked about ROI or investment returns
-
-RESPOND WITH EXACTLY THIS JSON:
-{{
-  "action": "send_text",
-  "city": "{user_city}",
-  "reply_text": "your message here",
-  "include_roi": false,
-  "handover_reason": null
-}}"""
-
-            ai_response_raw = call_gemini_with_circuit_breaker(
-                ai_prompt, msg.sender_id, user_city, user_budget, user_interest, correlation_id=corr_id
-            )
-
-            # Parse AI JSON decision
-            action = "send_text"
-            full_reply = ""
-            include_roi = False
-            ai_city = user_city
-            final_handover_reason = handover_reason
-            reply_type_for_log = "AI"
-
-            try:
-                if isinstance(ai_response_raw, dict) and ai_response_raw.get("fallback"):
-                    full_reply = ai_response_raw["text"]
-                    action = "send_text"
+            if user_rate_limiter.is_rate_limited(msg.sender_id):
+                full_reply = "Please wait a moment. 😊"
+                reply_type_for_log = "FALLBACK"
+            else:
+                ai_result = call_gemini_with_circuit_breaker(
+                    prompt, msg.sender_id, user_city, user_budget, user_interest, correlation_id=corr_id
+                )
+                if isinstance(ai_result, dict) and ai_result.get("fallback") is True:
+                    full_reply = ai_result["text"]
                     reply_type_for_log = "FALLBACK"
-                    safe_log_warning(f"[AI] Gemini fallback triggered | {corr_id}")
                 else:
-                    clean_json = ai_response_raw.strip()
-                    if "```" in clean_json:
-                        clean_json = clean_json.split("```")[1]
-                        if clean_json.startswith("json"):
-                            clean_json = clean_json[4:]
-                    clean_json = clean_json.strip()
-
-                    ai_decision    = json.loads(clean_json)
-                    action         = ai_decision.get("action", "send_text")
-                    full_reply     = ai_decision.get("reply_text", "")
-                    include_roi    = ai_decision.get("include_roi", False)
-                    ai_city        = ai_decision.get("city", user_city)
-                    final_handover_reason = ai_decision.get("handover_reason") or handover_reason
-
-                    if ai_city and ai_city != "Not Mentioned":
-                        conversation_state.update(msg.sender_id, 'city', ai_city)
-
-                    safe_log_info(f"[AI-DECISION] action={action} | roi={include_roi} | city={ai_city} | {corr_id}")
-
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                safe_log_warning(f"[AI-DECISION] JSON parse failed: {e} | raw: {str(ai_response_raw)[:150]}")
-                full_reply = ai_response_raw if isinstance(ai_response_raw, str) else "Let me help you find the perfect property! Which city interests you? 🏙️"
-                action = "send_text"
-                reply_type_for_log = "AI_FALLBACK"
+                    full_reply = ai_result
+                    reply_type_for_log = "AI"
             
-            # ══════════════════════════════════════════════════════════
-            # BACKEND EXECUTES AI DECISION
-            # ══════════════════════════════════════════════════════════
-            safe_log_info(f"[REPLY] TYPE={reply_type_for_log} | action={action} | {corr_id} | User={msg.sender_id[-4:]}")
+            # Handle photos
+            if "SHOW_PHOTO" in full_reply:
+                try:
+                    match = re.search(r"SHOW_PHOTO:\s*([A-Za-z]+)", full_reply)
+                    
+                    if match:
+                        target_location = match.group(1).lower()
+                        clean_text = full_reply.replace(match.group(0), "").strip()
+                        
+                        if clean_text:
+                            send_whatsapp_text_with_retry(msg.sender_id, clean_text)
+                        
+                        found = False
+                        for prop in PROPERTIES:
+                            if target_location in prop['location'].lower():
+                                # AFTER:
+                                lines = [f"📍 {prop['name']}", f"💰 {prop.get('currency','AED')} {prop['price_aed']}"]
+                                if prop.get('property_type'):
+                                    lines.append(f"🏠 {prop['property_type'].title()}")
+                                specs = []
+                                if prop.get('bedrooms') not in (None, 'N/A'): specs.append(f"{prop['bedrooms']} bed")
+                                if prop.get('bathrooms') not in (None, 'N/A'): specs.append(f"{prop['bathrooms']} bath")
+                                if prop.get('area') not in (None, 'N/A'): specs.append(f"{prop['area']:,} sqft")
+                                if specs: lines.append("🛏️ " + "  •  ".join(specs))
+                                if prop.get('roi') not in (None, 'N/A'): lines.append(f"📈 ROI: {prop['roi']}")
+                                if prop.get('emi_available'): lines.append("💳 EMI available")
+                                if prop.get('location','').strip(): lines.append(f"📌 {prop['location'].strip()}")
+                                caption = "\n".join(lines)[:1024]
+                                send_whatsapp_image_with_retry(msg.sender_id, prop['image_url'], caption)
+                                found = True
+                                break
+                        
+                        if not found:
+                            default_image = "https://images.unsplash.com/photo-1512453979798-5ea904ac6605?q=80&w=1000"
+                            send_whatsapp_image_with_retry(msg.sender_id, default_image, f"{target_location.title()} property 🏙️")
+                
+                except Exception as e:
+                    safe_log_error(f"[PHOTO] Error: {e}")
+                    send_whatsapp_text_with_retry(msg.sender_id, full_reply.replace("SHOW_PHOTO", ""))
+            else:
+                if reply_type_for_log is None:
+                    reply_type_for_log = "FALLBACK"
+                    safe_log_warning(f"[REPLY] Type missing, defaulting to FALLBACK | {corr_id}")
 
-            # 1. Always send text reply first
-            if full_reply:
-                send_whatsapp_text_with_retry(msg.sender_id, full_reply, correlation_id=corr_id)
+                safe_log_info(
+                    f"[REPLY] TYPE={reply_type_for_log} | Correlation={corr_id} | User={msg.sender_id[-4:]}"
+                )
 
-            # 2. Send property images if AI decided
-            if action == "send_properties":
-                target_city = ai_city.lower() if ai_city not in ("Not Mentioned", "") else ""
-                found = False
-                for prop in PROPERTIES:
-                    if not target_city or target_city in prop['location'].lower():
-                        # Build rich property caption with all available details
-                        currency = prop.get('currency', 'AED')
-                        price = prop.get('price_aed', 'N/A')
-                        lines = []
-                        lines.append(f"📍 *{prop['name']}*")
-                        lines.append(f"💰 {currency} {price}")
-                        
-                        # Property specs - only add if available
-                        if prop.get('property_type'):
-                            lines.append(f"🏠 Type: {prop['property_type'].title()}")
-                        if prop.get('bedrooms') not in (None, 'N/A'):
-                            lines.append(f"🛏️ Bedrooms: {prop['bedrooms']}")
-                        if prop.get('bathrooms') not in (None, 'N/A'):
-                            lines.append(f"🚿 Bathrooms: {prop['bathrooms']}")
-                        if prop.get('area') not in (None, 'N/A'):
-                            lines.append(f"📐 Area: {prop['area']:,} sqft")
-                        
-                        # Investment details
-                        if include_roi and prop.get('roi') not in (None, 'N/A'):
-                            lines.append(f"📈 ROI: {prop['roi']}")
-                        if prop.get('emi_available'):
-                            lines.append(f"💳 EMI: Available")
-                        
-                        # Location
-                        if prop.get('location', '').strip():
-                            lines.append(f"📌 {prop['location'].strip()}")
-                        
-                        # Description - only if available
-                        if prop.get('description', '').strip():
-                            lines.append(f"\n📝 {prop['description'].strip()}")
-                        
-                        caption = "\n".join(lines)
-                        # Send all images - primary first, then rest in order
-                        all_images = prop.get('all_images', [prop['image_url']])
-                        for i, img_url in enumerate(all_images):
-                            img_caption = caption if i == 0 else ""
-                            safe_log_info(f"[PHOTOS] Sending image {i+1}/{len(all_images)}: {img_url}")
-                            send_whatsapp_image_with_retry(msg.sender_id, img_url, img_caption)
-                        found = True
-                        break
-                if not found:
-                    default_image = "https://images.unsplash.com/photo-1512453979798-5ea904ac6605?q=80&w=1000"
-                    safe_log_info(f"[PHOTOS] Sending default image: {default_image}")
-                    send_whatsapp_image_with_retry(msg.sender_id, default_image, "Premium property 🏙️")
-                safe_log_info(f"[PHOTOS] Sent | city={target_city} | roi={include_roi} | {corr_id}")
-
-            # 3. Mark email asked if AI decided
-            if action == "ask_email" and user_email == "Not Provided":
-                conversation_state.mark_email_asked(msg.sender_id)
-
-            # 4. Handover if AI decided or score triggered
-            handover_triggered = (action == "handover") or (should_handover and not handovermanager.is_handed_over(msg.sender_id))
-            if handover_triggered and not handovermanager.is_handed_over(msg.sender_id):
-                handovermanager.record_handover(msg.sender_id)
-                reason = final_handover_reason or "High-value lead ready for consultation"
-                handover_message = handovermanager.get_handover_message(reason)
-                send_whatsapp_text_with_retry(msg.sender_id, handover_message, correlation_id=corr_id)
-                safe_log_info(f"[HANDOVER] Executed | reason={reason} | {corr_id}")
+                send_whatsapp_text_with_retry(msg.sender_id, full_reply)
 
 
             # ✅ ALWAYS LOG (moved outside if-else)
@@ -1039,32 +791,11 @@ RESPOND WITH EXACTLY THIS JSON:
                     msg.user_name,
                     msg.text_body,
                     full_reply,
-                    f"AI:{action}",
                     corr_id
                 )
             except Exception as e:
-                safe_log_error(f"[LOGS] Failed: {e}")
-
-            # Write log to database
-            try:
-                log_data = {
-                    "user_name": msg.user_name or "Unknown",
-                    "phone": msg.sender_id,
-                    "user_message": msg.text_body,
-                    "bot_response": full_reply,
-                    "reply_type": f"AI:{action}",
-                }
-                db_log_resp = requests.post(
-                    f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/logs",
-                    json=log_data,
-                    headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                    timeout=5
-                )
-                if db_log_resp.status_code not in (200, 201):
-                    safe_log_error(f"[DB-LOG] Failed: {db_log_resp.status_code}")
-            except Exception as e:
-                safe_log_error(f"[DB-LOG] Error: {e}")
-
+                safe_log_error(f"[LOGS] Failed: {e}")     
+            
             safe_log_info(f"[WORKER] Completed {msg.correlation_id}")
             
         except Exception as e:
@@ -1095,7 +826,7 @@ RESPOND WITH EXACTLY THIS JSON:
             
             # Full traceback for debugging
             import traceback
-            safe_log_debug(f"[WORKER] Traceback for {msg.correlation_id}:\n{traceback.format_exc()}")
+            safe_log_error(f"[WORKER] Traceback for {msg.correlation_id}:\n{traceback.format_exc()}")
 
 webhook_processor = WebhookProcessor(max_workers=8)
 
@@ -1454,72 +1185,7 @@ def get_dubai_time():
         return datetime.now(dubai_tz).strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-# ============================================================================
-# AI DECISION LOGIC
-# ============================================================================
-def should_use_ai(message: str, user_city: str, user_interest: str, user_budget: str) -> bool:
-    """
-    Determine if AI should be used for this message.
-    Returns False for template-eligible messages, True for complex queries.
-    """
-    msg_lower = message.lower().strip()
-    word_count = len(msg_lower.split())
-    
-    # Block AI for short messages (4 words or less)
-    if word_count <= 4:
-        return False
-    
-    # Block AI for greetings
-    greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 
-                 'good evening', 'hii', 'hiii', 'helo', 'hola', 'namaste']
-    if msg_lower in greetings:
-        return False
-    
-    # Block AI for city keywords
-    cities = ['dubai', 'marina', 'downtown', 'meydan', 'abudhabi', 
-              'yas', 'uk', 'london', 'manchester']
-    if any(city in msg_lower for city in cities) and word_count <= 2:
-        return False
-    
-    # Block AI for interest/budget keywords
-    budget_keywords = ['luxury', 'standard', 'affordable', 'budget', 'premium', 'cheap']
-    if any(keyword in msg_lower for keyword in budget_keywords) and word_count <= 2:
-        return False
-    
-    # Block AI for photo requests
-    photo_keywords = ['photo', 'picture', 'image', 'show me', 'send']
-    if any(keyword in msg_lower for keyword in photo_keywords):
-        return False
-    
-    # Block AI for simple yes/no/thanks
-    simple_responses = ['yes', 'no', 'y', 'n', 'ok', 'okay', 'thanks', 
-                       'thank you', 'thankyou', 'ty', 'bye', 'goodbye']
-    if msg_lower in simple_responses:
-        return False
-    
-    # Block AI for email patterns (already handled by template)
-    if '@' in message:
-        return False
-    
-    # Allow AI for objection/doubt keywords (these need nuanced responses)
-    objection_keywords = ['worth', 'safe', 'legal', 'scam', 'doubt', 'sure', 
-                         'risk', 'trust', 'concern', 'worried', 'hesitant']
-    if any(keyword in msg_lower for keyword in objection_keywords):
-        return True
-    
-    # Allow AI for open-ended questions
-    question_starters = ['why', 'how', 'what', 'when', 'where', 'who', 
-                        'can you', 'could you', 'would you', 'tell me']
-    if any(msg_lower.startswith(starter) for starter in question_starters):
-        return True
-    
-    # Allow AI for complex sentences (5+ words not matching templates)
-    if word_count >= 5:
-        return True
-    
-    # Default: block AI (prefer templates)
-    return False    
+       
 
 # ============================================================================
 # WHATSAPP API WITH RETRY
@@ -1598,7 +1264,7 @@ def send_whatsapp_image_with_retry(to_number: str, image_url: str, caption: str,
                 safe_log_info(f"[WHATSAPP] ✅ Image sent to {to_number[-4:]}")
                 return True
             else:
-                safe_log_error(f"[WHATSAPP] Image failed: {response.status_code} | Body: {response.text[:300]}")
+                safe_log_error(f"[WHATSAPP] Image failed: {response.status_code}")
                 time.sleep(2 ** attempt)
         
         except Exception as e:
@@ -1606,163 +1272,6 @@ def send_whatsapp_image_with_retry(to_number: str, image_url: str, caption: str,
             time.sleep(2 ** attempt)
     
     return False
-
-# ============================================================================
-# SMART TEMPLATE RESPONSE
-# ============================================================================
-def get_smart_template_response(message: str, user_city: str, user_interest: str, 
-                                user_email: str, user_id: str, user_budget: str) -> Optional[str]:
-    msg_lower = message.lower().strip()
-    
-    # ✅ NOTE: Resume check now happens in _process_message() BEFORE this function
-    # This ensures old users never reach template logic
-
-
-    # Email validation & collection
-    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    email_match = re.search(email_pattern, message)
-    
-    if email_match:
-        provided_email = email_match.group(0)
-        conversation_state.update(user_id, 'email', provided_email)
-        conversation_state.mark_email_asked(user_id)
-        if user_city != "Not Mentioned":
-            return f"Perfect! Thank you for sharing your email. Would you like to see some property photos in {user_city} now? 📸"
-        else:
-            return "Perfect! Thank you for sharing your email. Which city would you like to explore? Dubai 🌆 | Abu Dhabi 🏙️ | UK 🇬🇧"
-    
-    # Budget extraction
-    budget_amount, budget_cat = budgetqualifier.extract_budget_from_message(message)
-    
-    if budget_cat and budget_cat != user_budget:
-        safe_log_debug(f"[BUDGET] User {user_id[-4:]} specified budget: {budget_cat}")
-        
-        matched_properties = budgetqualifier.match_properties(
-            PROPERTIES, budget_cat, user_city, max_results=3
-        )
-        property_summary = budgetqualifier.format_property_summary(matched_properties)
-        
-        conversation_state.update(user_id, 'budget', budget_cat)
-        return property_summary
-    
-    # Greetings
-    greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 
-                 'good evening', 'hii', 'hiii', 'helo', 'hola', 'namaste']
-    if msg_lower in greetings or len(msg_lower) <= 3:
-        conversation_state.update(user_id, 'greeted', 'yes')
-        return ("Hi there! 👋 I'm Sarah, your property consultant. "
-                "Which city are you interested in?\n\n"
-                "🏙️ Dubai (Marina, Downtown)\n"
-                "🌆 Abu Dhabi (Yas Island)\n"
-                "🇬🇧 UK (London, Manchester)")
-    
-    # Thanks / Bye
-    if msg_lower in ['thanks', 'thank you', 'thankyou', 'ty', 'ok', 'okay', 'bye', 'goodbye']:
-        return "You're welcome! Feel free to reach out anytime. Have a great day! 😊"
-    
-    # City selection
-    cities_map = {
-        'dubai': 'Dubai',
-        'marina': 'Dubai Marina',
-        'downtown': 'Downtown Dubai',
-        'abudhabi': 'Abu Dhabi',
-        'yas': 'Yas Island',
-        'uk': 'UK',
-        'london': 'London',
-        'manchester': 'Manchester'
-    }
-    
-    if msg_lower in cities_map and len(msg_lower.split()) == 1:
-        city_name = cities_map[msg_lower]
-        conversation_state.update(user_id, 'city', city_name)
-        return (f"Excellent choice! {city_name} has fantastic properties. 🏢\n\n"
-                f"What's your budget preference?\n"
-                f"💎 Luxury - Premium properties\n"
-                f"🏠 Standard - Great value\n"
-                f"💰 Affordable - Budget-friendly")
-    
-    # Budget selection
-    if msg_lower in ['luxury', 'standard', 'affordable', 'budget']:
-        interest_name = msg_lower.title()
-        conversation_state.update(user_id, 'interest', interest_name)
-        
-        if conversation_state.should_ask_for_email(user_id, user_email):
-            conversation_state.mark_email_asked(user_id)
-            return (f"Perfect! {interest_name} properties are a great choice. 🌟\n\n"
-                    f"To show you our exclusive listings, may I have your email address? "
-                    f"📧 This helps me send you detailed brochures and property updates.")
-        
-        if user_city != "Not Mentioned":
-            return f"Perfect! I have some beautiful {interest_name.lower()} properties in {user_city}. Would you like to see some photos? 📸"
-        else:
-            return f"Great choice! {interest_name} properties it is. Which city would you like to explore? Dubai 🌆 | Abu Dhabi 🏙️ | UK 🇬🇧"
-    
-    # Photo requests
-    photo_keywords = ['yes', 'sure', 'photos', 'pictures', 'images', 'show me', 'send', 'yeah', 'yep']
-    if any(keyword in msg_lower for keyword in photo_keywords):
-        if conversation_state.should_ask_for_email(user_id, user_email):
-            conversation_state.mark_email_asked(user_id)
-            return ("I'd love to show you our properties! 📸\n\n"
-                    "Before I send them, may I have your email address? "
-                    "This way I can also send you detailed brochures. 📧")
-        
-        if user_city != "Not Mentioned":
-            return f"Here is a glimpse of the exclusive units we have in {user_city}. SHOW_PHOTO: {user_city}"
-        else:
-            return "I'd love to show you our properties! Which city interests you? Dubai 🌆 | Abu Dhabi 🏙️ | UK 🇬🇧"
-    
-    # Price questions
-    if any(word in msg_lower for word in ['price', 'cost', 'expensive', 'cheap', 'how much']):
-        if user_city != "Not Mentioned":
-            prices = {
-                'Marina': '1.5M AED onwards',
-                'Downtown': '2.8M AED onwards',
-                'Meydan': '4.2M AED onwards',
-                'Dubai': '1.5M - 4.5M AED range',
-                'Abu Dhabi': '2M - 5M AED range',
-                'UK': '£500k - £3M range'
-            }
-            price_info = prices.get(user_city, '1.5M - 5M AED')
-            return f"In {user_city}, our properties range from {price_info} depending on type and location. Would you like to see specific options? 🏢"
-        else:
-            return "Property prices vary by location. Which city are you interested in? Dubai 🌆 | Abu Dhabi 🏙️ | UK 🇬🇧"
-    
-    # ROI questions
-    if 'roi' in msg_lower or 'return' in msg_lower or 'investment' in msg_lower:
-        return ("Our properties offer excellent ROI! 📈\n\n"
-                "• Dubai Marina: ~6.5% average\n"
-                "• Downtown: ~7.2% average\n"
-                "• Meydan: ~5.8% average\n\n"
-                "Would you like to see specific properties?")
-    
-    # Location questions
-    if 'where' in msg_lower or 'location' in msg_lower or 'area' in msg_lower:
-        return ("We have premium properties in:\n\n"
-                "🇦🇪 Dubai (Marina, Downtown, Meydan)\n"
-                "🇦🇪 Abu Dhabi (Yas, Saadiyat)\n"
-                "🇬🇧 UK (London, Manchester)\n\n"
-                "Which location interests you?")
-    
-    # Simple yes/no
-    if msg_lower in ['yes', 'no', 'y', 'n']:
-        if conversation_state.get(user_id, 'email_asked') == 'yes' and user_email == "Not Provided":
-            if msg_lower in ['no', 'n']:
-                return "No problem! You can always share it later. How else can I assist you with your property search? 🏢"
-        
-        if msg_lower in ['yes', 'y'] and user_city != "Not Mentioned":
-            return f"Here is a glimpse of the exclusive units we have in {user_city}. SHOW_PHOTO: {user_city}"
-        
-        return "I'd be happy to help! What would you like to know about our properties? 🏢"
-    
-    # Short messages
-    if len(msg_lower) <= 5 and len(msg_lower.split()) == 1:
-        return ("I'm here to help! Would you like to:\n\n"
-                "🏙️ Explore properties in a specific city\n"
-                "💰 Learn about pricing and ROI\n"
-                "📸 See property photos")
-    
-    return None
-
 # ============================================================================
 # GEMINI CONCURRENCY PROTECTION
 # ============================================================================
@@ -1814,14 +1323,14 @@ gemini_circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60)
 
 def call_gemini_with_circuit_breaker(prompt: str, user_id: str, user_city: str = "", 
                                      user_budget: str = "", user_interest: str = "", correlation_id="N/A") -> str:
-    # cache_key = response_cache.get_cache_key(
-    #     user_id, prompt, city=user_city, budget=user_budget, interest=user_interest
-    # )
-    # cached_response = response_cache.get(cache_key)
+    cache_key = response_cache.get_cache_key(
+        user_id, prompt, city=user_city, budget=user_budget, interest=user_interest
+    )
+    cached_response = response_cache.get(cache_key)
     
-    # if cached_response:
-    #     safe_log_debug(f"[GEMINI] {correlation_id} | Cache hit for {user_id[-4:]}")
-    #     return cached_response
+    if cached_response:
+        safe_log_debug(f"[GEMINI] {correlation_id} | Cache hit for {user_id[-4:]}")
+        return cached_response
     
     can_use, remaining = ai_usage_tracker.can_use_ai(user_id)
     if not can_use:
@@ -1851,7 +1360,7 @@ def call_gemini_with_circuit_breaker(prompt: str, user_id: str, user_city: str =
     try:
         full_reply = gemini_circuit_breaker.call(_call_api)
         
-        # response_cache.set(cache_key, full_reply)
+        response_cache.set(cache_key, full_reply)
         ai_usage_tracker.record_ai_call(user_id)
         
         safe_log_info(f"[GEMINI] {correlation_id} | ✅ Success for {user_id[-4:]}")
@@ -2176,8 +1685,6 @@ def startup():
     safe_log_info("=" * 70)
 
     # Start background services
-    safe_log_info("[INIT] Loading properties from backend...")
-    fetch_properties_from_backend()
     safe_log_info("[INIT] Starting webhook processor...")
     webhook_processor.start()
 

@@ -1,5 +1,4 @@
  import { useState } from 'react';
- import { useTheme, themeConfig, ThemeName } from '@/contexts/ThemeContext';
  import { Link, useLocation, useNavigate } from 'react-router-dom';
  import { useAuth } from '@/contexts/AuthContext';
  import { Button } from '@/components/ui/button';
@@ -12,10 +11,16 @@
    DropdownMenuTrigger,
  } from '@/components/ui/dropdown-menu';
  import {
-  Building2, LayoutDashboard, Home, Bot, Menu, X, LogOut, User, ChevronDown,
-  BarChart2, Users, FileText,
-} from 'lucide-react';
-
+   Building2,
+   LayoutDashboard,
+   Home,
+   Bot,
+   Menu,
+   X,
+   LogOut,
+   User,
+   ChevronDown,
+ } from 'lucide-react';
  import { cn } from '@/lib/utils';
  
  interface DashboardLayoutProps {
@@ -23,17 +28,13 @@
  }
  
  const navItems = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Properties', href: '/properties', icon: Home },
-  { name: 'Bot Preview', href: '/bot-preview', icon: Bot },
-  { name: 'Analytics', href: '/analytics', icon: BarChart2 },
-  { name: 'Leads', href: '/leads', icon: Users },
-  { name: 'Logs', href: '/logs', icon: FileText },
-];
+   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+   { name: 'Properties', href: '/properties', icon: Home },
+   { name: 'Bot Preview', href: '/bot-preview', icon: Bot },
+ ];
  
  export function DashboardLayout({ children }: DashboardLayoutProps) {
    const [sidebarOpen, setSidebarOpen] = useState(false);
-   const { theme, setTheme } = useTheme();
    const { user, logout } = useAuth();
    const location = useLocation();
    const navigate = useNavigate();
@@ -56,7 +57,7 @@
        {/* Sidebar */}
        <aside
          className={cn(
-           'fixed inset-y-0 left-0 z-50 w-64 transform bg-sidebar text-sidebar-foreground transition-transform duration-200 ease-in-out lg:fixed lg:translate-x-0',
+           'fixed inset-y-0 left-0 z-50 w-64 transform bg-sidebar text-sidebar-foreground transition-transform duration-200 ease-in-out lg:relative lg:translate-x-0',
            sidebarOpen ? 'translate-x-0' : '-translate-x-full'
          )}
        >
@@ -135,7 +136,7 @@
        </aside>
  
        {/* Main content */}
-       <div className="flex flex-1 flex-col lg:ml-64">
+       <div className="flex flex-1 flex-col">
          {/* Top bar */}
          <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b bg-background px-4 lg:px-6">
            <Button
@@ -147,23 +148,6 @@
              <Menu className="h-5 w-5" />
            </Button>
            <div className="flex-1" />
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-2">
-                  <div className="h-3 w-3 rounded-full" style={{ background: themeConfig[theme].color }} />
-                  {themeConfig[theme].label}
-                  <ChevronDown className="h-3 w-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {Object.entries(themeConfig).map(([key, val]) => (
-                  <DropdownMenuItem key={key} onClick={() => setTheme(key as ThemeName)}>
-                    <div className="h-3 w-3 rounded-full mr-2" style={{ background: val.color }} />
-                    {val.label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
          </header>
  
          {/* Page content */}

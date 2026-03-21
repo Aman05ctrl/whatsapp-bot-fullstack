@@ -26,18 +26,8 @@ class PropertyCreate(BaseModel):
     expected_roi: Optional[float] = Field(None, ge=0, le=100)
     property_type: PropertyType
     bhk: Optional[int] = Field(None, gt=0, le=10)
-    bedrooms: Optional[int] = Field(None, ge=0)
-    bathrooms: Optional[float] = Field(None, ge=0)
-    address: Optional[str] = None
-    state: Optional[str] = None
-    zip_code: Optional[str] = None
-    kitchen: Optional[int] = None
-    dining_hall: Optional[int] = None
-    hall: Optional[int] = None
-    terrace: Optional[bool] = None
     description: Optional[str] = None
     status: PropertyStatus = PropertyStatus.ACTIVE
-    currency: str = 'AED'
 
 
 class PropertyUpdate(BaseModel):
@@ -51,18 +41,8 @@ class PropertyUpdate(BaseModel):
     expected_roi: Optional[float] = Field(None, ge=0, le=100)
     property_type: Optional[PropertyType] = None
     bhk: Optional[int] = Field(None, gt=0, le=10)
-    bedrooms: Optional[int] = Field(None, ge=0)
-    bathrooms: Optional[float] = Field(None, ge=0)
-    address: Optional[str] = None
-    state: Optional[str] = None
-    zip_code: Optional[str] = None
-    kitchen: Optional[int] = None
-    dining_hall: Optional[int] = None
-    hall: Optional[int] = None
-    terrace: Optional[bool] = None
     description: Optional[str] = None
     status: Optional[PropertyStatus] = None
-    currency: Optional[str] = None
 
 
 class PropertyResponse(BaseModel):
@@ -78,18 +58,8 @@ class PropertyResponse(BaseModel):
     expected_roi: Optional[float]
     property_type: PropertyType
     bhk: Optional[int]
-    bedrooms: Optional[int] = None
-    bathrooms: Optional[float]
-    address: Optional[str]
-    state: Optional[str]
-    zip_code: Optional[str]
-    kitchen: Optional[int] = None
-    dining_hall: Optional[int] = None
-    hall: Optional[int] = None
-    terrace: Optional[bool] = None
     description: Optional[str]
     status: PropertyStatus
-    currency: str = 'AED'
     created_at: datetime
     updated_at: datetime
     images: List[PropertyImageResponse] = []

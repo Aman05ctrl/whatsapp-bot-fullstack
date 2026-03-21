@@ -1,9 +1,0 @@
-version: "2"
-authtoken: 36iCBeHKqAoFlvjzFPK1zk27t6A_3sRCBLzBushy4ny15XupW
-tunnels:
-  main:
-    addr: 5000
-    proto: http
-    request_header:
-      add:
-        - "ngrok-skip-browser-warning: true"

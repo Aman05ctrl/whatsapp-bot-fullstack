@@ -73,7 +73,7 @@
  
      try {
        const updated = await api.properties.markSold(id);
-        setProperty({ ...updated, is_sold: true, status: 'sold' });
+       setProperty(updated);
        toast.success('Property marked as sold');
      } catch (err) {
        const message = err instanceof ApiError ? err.message : 'Failed to mark as sold';
@@ -116,28 +116,27 @@
      }
    };
  
-   const handleSetPrimary = async (imageId: string) => {
+   const handleSetPrimary = async (imageId: number) => {
      if (!id) return;
  
      try {
-       await api.images.setPrimary(id, imageId);
-       setImages(images.map(img => ({
-         ...img,
-         is_primary: String(img.id) === imageId,
-       })));
-       toast.success('Primary image updated');
+        await api.images.setPrimary(id, imageId);
+        // Refresh images from server to get updated primary status
+        const updatedImages = await api.images.list(id);
+        setImages(updatedImages);
+        toast.success('Primary image updated');
      } catch (err) {
        const message = err instanceof ApiError ? err.message : 'Failed to set primary image';
        toast.error(message);
      }
    };
  
-   const handleDeleteImage = async (imageId: string) => {
+   const handleDeleteImage = async (imageId: number) => {
      if (!id) return;
  
      try {
        await api.images.delete(id, imageId);
-       setImages(images.filter(img => String(img.id) !== imageId));
+       setImages(images.filter(img => img.id !== imageId));
        toast.success('Image deleted');
      } catch (err) {
        const message = err instanceof ApiError ? err.message : 'Failed to delete image';
@@ -186,21 +185,21 @@
              <div>
                <h1 className="page-header">{property.title}</h1>
                <div className="flex items-center gap-2 text-muted-foreground">
-                 {property.city && property.state && (
-                   <>
-                     <MapPin className="h-4 w-4" />
-                     <span>{property.city}, {property.state}</span>
-                   </>
-                 )}
-                 <span className={property.is_sold ? 'status-sold' : 'status-available'}>
-                   {property.is_sold ? 'Sold' : 'Available'}
-                 </span>
+                 {property.city && (
+                  <>
+                    <MapPin className="h-4 w-4" />
+                    <span>{property.city}</span>
+                  </>
+                )}
+                 <span className={property.status === 'sold' ? 'status-sold' : 'status-available'}>
+                  {property.status === 'sold' ? 'Sold' : 'Available'}
+                </span>
                </div>
              </div>
            </div>
  
            <div className="flex gap-2">
-             {!property.is_sold && (
+             {property.status !== 'sold' && (
                <Button
                  variant="outline"
                  onClick={handleMarkSold}
@@ -304,7 +303,7 @@
                              <Button
                                size="sm"
                                variant="secondary"
-                               onClick={() => handleSetPrimary(String(image.id))}
+                               onClick={() => handleSetPrimary(image.id)}
                              >
                                <Star className="h-4 w-4" />
                              </Button>
@@ -312,7 +311,7 @@
                            <Button
                              size="sm"
                              variant="destructive"
-                             onClick={() => handleSetPrimary(String(image.id))}
+                             onClick={() => handleDeleteImage(image.id)}
                            >
                              <X className="h-4 w-4" />
                            </Button>
@@ -346,18 +345,9 @@
                  <CardTitle>Price</CardTitle>
                </CardHeader>
                <CardContent>
-                 <div>
-                   {property.price ? (
-                     <div className="space-y-0">
-                       <p className="text-sm text-muted-foreground font-normal">
-                         {property.currency || 'AED'}
-                       </p>
-                       <p className="text-3xl font-bold text-accent">
-                         {property.price.toLocaleString()}
-                       </p>
-                     </div>
-                   ) : <span className="text-3xl font-bold text-accent">Price TBD</span>}
-                 </div>
+                 <p className="text-3xl font-bold text-accent">
+                   {property.price ? `$${property.price.toLocaleString()}` : 'Price TBD'}
+                 </p>
                </CardContent>
              </Card>
  
@@ -365,94 +355,81 @@
                <CardHeader>
                  <CardTitle>Details</CardTitle>
                </CardHeader>
-               <CardContent>
-                 <div className="grid grid-cols-3 gap-4">
-                   {/* Row 1 */}
-                   {property.property_type && (
+               <CardContent className="space-y-4">
+                 {property.property_type && (
+                   <div className="flex items-center gap-3">
+                     <Home className="h-5 w-5 text-muted-foreground" />
                      <div>
-                       <p className="text-xs text-muted-foreground">Type</p>
-                       <p className="font-medium text-sm">{property.property_type}</p>
+                       <p className="text-sm text-muted-foreground">Type</p>
+                       <p className="font-medium">{property.property_type}</p>
                      </div>
-                   )}
-                   {(property.area_sqft != null || property.area != null) && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Area (sqft)</p>
-                       <p className="font-medium text-sm">{(property.area_sqft || property.area || 0).toLocaleString()}</p>
-                     </div>
-                   )}
-                   {/* Row 2 */}
-                   {(property.bedrooms != null || property.bhk != null) && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Bedrooms</p>
-                       <p className="font-medium text-sm">{property.bedrooms ?? property.bhk}</p>
-                     </div>
-                   )}
-                   {property.bathrooms != null && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Bathrooms</p>
-                       <p className="font-medium text-sm">{property.bathrooms}</p>
-                     </div>
-                   )}
-                   {property.kitchen != null && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Kitchen</p>
-                       <p className="font-medium text-sm">{property.kitchen}</p>
-                     </div>
-                   )}
-                   {property.dining_hall != null && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Dining Hall</p>
-                       <p className="font-medium text-sm">{property.dining_hall}</p>
-                     </div>
-                   )}
-                   {property.hall != null && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Hall / Living Hall</p>
-                       <p className="font-medium text-sm">{property.hall}</p>
-                     </div>
-                   )}
-                   {property.terrace != null && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">Terrace</p>
-                       <p className="font-medium text-sm">{property.terrace ? 'Yes' : 'No'}</p>
-                     </div>
-                   )}
-                   {property.expected_roi != null && (
-                     <div>
-                       <p className="text-xs text-muted-foreground">ROI %</p>
-                       <p className="font-medium text-sm text-green-500">{property.expected_roi}%</p>
-                     </div>
-                   )}
-                   <div>
-                     <p className="text-xs text-muted-foreground">EMI Available</p>
-                     <p className="font-medium text-sm">{property.emi_available ? 'Yes' : 'No'}</p>
                    </div>
-                 </div>
+                 )}
+ 
+                 {property.bhk !== undefined && property.bhk !== null && (
+  <div className="flex items-center gap-3">
+    <Bed className="h-5 w-5 text-muted-foreground" />
+    <div>
+      <p className="text-sm text-muted-foreground">BHK</p>
+      <p className="font-medium">{property.bhk ?? 0} BHK</p>
+    </div>
+  </div>
+)}
+
+                {property.area !== undefined && property.area !== null && (
+                  <div className="flex items-center gap-3">
+                    <Maximize className="h-5 w-5 text-muted-foreground" />
+                    <div>
+                      <p className="text-sm text-muted-foreground">Area</p>
+                      <p className="font-medium">{property.area.toLocaleString()} sqft</p>
+                    </div>
+                  </div>
+                )}
+
+                {property.emi_available && (
+                  <>
+                    <div className="flex items-center gap-3">
+                      <div>
+                        <p className="text-sm text-muted-foreground">EMI Available</p>
+                        <p className="font-medium">Yes</p>
+                      </div>
+                    </div>
+                    {property.emi_amount && (
+                      <div className="flex items-center gap-3">
+                        <div>
+                          <p className="text-sm text-muted-foreground">EMI Amount</p>
+                          <p className="font-medium">${property.emi_amount.toLocaleString()}</p>
+                        </div>
+                      </div>
+                    )}
+                    {property.expected_roi && (
+                      <div className="flex items-center gap-3">
+                        <div>
+                          <p className="text-sm text-muted-foreground">Expected ROI</p>
+                          <p className="font-medium">{property.expected_roi ?? 0}%</p>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
                </CardContent>
              </Card>
  
-             {(property.address || property.city || property.state || property.zip_code) && (
-               <Card>
-                 <CardHeader>
-                   <CardTitle>Location</CardTitle>
-                 </CardHeader>
-                 <CardContent>
-                   <div className="flex items-start gap-3">
-                     <MapPin className="h-5 w-5 text-muted-foreground mt-0.5" />
-                     <div>
-                       {property.address && <p>{property.address}</p>}
-                       {(property.city || property.state || property.zip_code) && (
-                         <p>
-                           {property.city}
-                           {property.city && property.state && ', '}
-                           {property.state} {property.zip_code}
-                         </p>
-                       )}
-                     </div>
-                   </div>
-                 </CardContent>
-               </Card>
-             )}
+             {property.city && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Location</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-start gap-3">
+                    <MapPin className="h-5 w-5 text-muted-foreground mt-0.5" />
+                    <div>
+                      <p>{property.city}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
            </div>
          </div>
        </div>
