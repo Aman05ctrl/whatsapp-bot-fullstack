@@ -1,0 +1,29 @@
+[
+    {
+        "id": 1,
+        "name": "Luxury Marina View",
+        "location": "Marina",
+        "price_aed": "1,500,000",
+        "roi": "6.5%",
+        "description": "Amazing 1BR with full sea view. Walking distance to Metro.",
+        "image_url": "https://images.pexels.com/photos/3787839/pexels-photo-3787839.jpeg?auto=compress&cs=tinysrgb&w=600"
+    },
+    {
+        "id": 2,
+        "name": "Downtown Burj Suite",
+        "location": "Downtown",
+        "price_aed": "2,800,000",
+        "roi": "7.2%",
+        "description": "Opposite Burj Khalifa. High floor, fully furnished.",
+        "image_url": "https://images.pexels.com/photos/162031/dubai-tower-arab-khalifa-162031.jpeg?auto=compress&cs=tinysrgb&w=600"
+    },
+    {
+        "id": 3,
+        "name": "Meydan Golf Villa",
+        "location": "Meydan",
+        "price_aed": "4,200,000",
+        "roi": "5.8%",
+        "description": "3BR Villa on the golf course. Handover soon.",
+        "image_url": "https://images.pexels.com/photos/325185/pexels-photo-325185.jpeg?auto=compress&cs=tinysrgb&w=600"
+    }
+]
