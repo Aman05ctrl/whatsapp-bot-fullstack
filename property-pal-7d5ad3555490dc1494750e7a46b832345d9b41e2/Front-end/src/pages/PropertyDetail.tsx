@@ -310,12 +310,12 @@
                              </Button>
                            )}
                            <Button
-                             size="sm"
-                             variant="destructive"
-                             onClick={() => handleSetPrimary(String(image.id))}
-                           >
-                             <X className="h-4 w-4" />
-                           </Button>
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => handleDeleteImage(String(image.id))}
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
                          </div>
                        </div>
                      ))}

@@ -52,6 +52,32 @@ def safe_log_debug(message: str):
 _SHEETS_CLIENT = None
 _SHEETS_CLIENT_LOCK = threading.Lock()
 
+# ─── Worksheet cache (avoids re-opening sheet on every message) ───
+# Without this: every CRM operation = 1+ seconds of network roundtrip.
+# With this: opens once per worksheet, reuses forever.
+_WORKSHEET_CACHE = {}
+_WORKSHEET_CACHE_LOCK = threading.Lock()
+
+def get_worksheet_cached(sheet_name: str, worksheet_name: str):
+    """Returns cached worksheet handle. Opens it only on first call."""
+    cache_key = f"{sheet_name}::{worksheet_name}"
+    
+    if cache_key in _WORKSHEET_CACHE:
+        return _WORKSHEET_CACHE[cache_key]
+    
+    with _WORKSHEET_CACHE_LOCK:
+        if cache_key in _WORKSHEET_CACHE:  # Double-check after acquiring lock
+            return _WORKSHEET_CACHE[cache_key]
+        try:
+            client = get_sheets_client()
+            ws = client.open(sheet_name).worksheet(worksheet_name)
+            _WORKSHEET_CACHE[cache_key] = ws
+            safe_log_info(f"[SHEETS] Cached worksheet: {worksheet_name}")
+            return ws
+        except Exception as e:
+            safe_log_error(f"[SHEETS] Failed to cache worksheet {worksheet_name}: {e}")
+            raise
+
 def get_sheets_client():
     """Lazy singleton for Google Sheets client"""
     global _SHEETS_CLIENT
@@ -277,7 +303,7 @@ def get_user_data_once(sender_id: str) -> dict:
         client = get_sheets_client()
         
         GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'Dubai Real Estate Leads')
-        sheet = client.open(GOOGLE_SHEET_NAME).worksheet('Profiles')
+        sheet = get_worksheet_cached(GOOGLE_SHEET_NAME, 'Profiles')
         
         # ✅ UNIFIED: Generate fingerprint ONCE
         WHATSAPP_MODE_LOCAL = os.getenv('WHATSAPP_MODE', 'PROD').upper()
@@ -341,7 +367,7 @@ def get_user_resume_context(sender_id: str) -> dict:
     try:
         client = get_sheets_client()
         GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'Dubai Real Estate Leads')
-        sheet = client.open(GOOGLE_SHEET_NAME).worksheet('Profiles')
+        sheet = get_worksheet_cached(GOOGLE_SHEET_NAME, 'Profiles')
         
         # ✅ UNIFIED: Generate fingerprint ONCE
         WHATSAPP_MODE_LOCAL = os.getenv("WHATSAPP_MODE", "PROD").upper()
@@ -688,7 +714,7 @@ class DropDetectionManager:
             
             client = get_sheets_client()
             GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'Dubai Real Estate Leads')
-            sheet = client.open(GOOGLE_SHEET_NAME).worksheet('Profiles')
+            sheet = get_worksheet_cached(GOOGLE_SHEET_NAME, 'Profiles')
             
             # Get all users who need summary
             all_rows = sheet.get_all_values()
@@ -804,14 +830,10 @@ def update_sheet_with_crm_features_optimized(sender_id, username, email, city, i
 
     with GLOBAL_SHEET_LOCK:  # FIX ISSUE 2: Protected by global lock
         try:
-            # scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-            # creds = Credentials.from_service_account_file('google_key.json', scopes=scope)
-            # client = gspread.authorize(creds)
-
             client = get_sheets_client()   
 
             GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'Dubai Real Estate Leads')
-            sheet = client.open(GOOGLE_SHEET_NAME).worksheet('Profiles')
+            sheet = get_worksheet_cached(GOOGLE_SHEET_NAME, 'Profiles')
 
             current_time = get_dubai_time()
             normalized_phone = normalize_phone_number(sender_id)
@@ -945,7 +967,7 @@ def log_conversation_to_sheet(sender_id: str, user_name: str, user_message: str,
         GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'Dubai Real Estate Leads')
         
         try:
-            logs_sheet = client.open(GOOGLE_SHEET_NAME).worksheet('Logs')
+            logs_sheet = get_worksheet_cached(GOOGLE_SHEET_NAME, 'Logs')
         except:
             safe_log_warning("[LOGS] 'Logs' sheet not found, skipping")
             return

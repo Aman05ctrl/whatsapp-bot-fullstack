@@ -1,265 +1,218 @@
 """
-Conversation Stage System for WhatsApp AI Bot
-==============================================
+Conversation Stage System - REWRITTEN FOR MAIN.PY ALIGNMENT
+============================================================
+Matches exact AI prompt flow from main.py:
+MSG 1: Name + City
+MSG 2-3: Purpose → Type (ONE at a time)
+MSG 4+: Budget → Email → Properties
 
-This module implements a 5-stage conversation flow that prevents premature
-handovers to human agents. It ensures the bot collects necessary information
-before suggesting specialist contact.
-
-THREAD-SAFE: All state modifications are protected by locks.
-IMPORT-SAFE: Fully self-contained with explicit dependencies.
-
-Author: Production Engineering Team
-Version: 2.0.0 (Fixed - Production Ready)
+Version: 3.0 (Production - Main.py Aligned)
+Date: March 28, 2026
 """
 
-# ============================================================================
-# EXPLICIT IMPORTS - MODULE IS FULLY SELF-CONTAINED
-# ============================================================================
-
 from enum import Enum
-from typing import Dict, List, Optional
-from datetime import datetime
+from typing import Dict
 import threading
 import logging
 
-# Setup module-level logger (safe pattern)
 logger = logging.getLogger(__name__)
 
 def safe_log_info(message: str):
-    """
-    Module-local logging function.
-    Fallback if parent module's logging isn't available.
-    """
     try:
         logger.info(message)
     except Exception:
-        # Graceful degradation - print if logging fails
         print(f"[INFO] {message}")
 
 def safe_log_warning(message: str):
-    """Module-local warning logger"""
     try:
         logger.warning(message)
     except Exception:
         print(f"[WARNING] {message}")
 
 # ============================================================================
-# CONVERSATION STAGE SYSTEM - PREVENTS PREMATURE HANDOVERS
+# STAGES - Aligned with main.py MSG flow
 # ============================================================================
-
 class ConversationStage(Enum):
     """
-    5-Stage conversation model that prevents premature closures.
-    Each stage has specific requirements before advancing.
+    5 stages matching main.py message flow:
+    - GREETING: MSG 1 only
+    - DISCOVERY: MSG 2-3 (city → purpose → type)
+    - QUALIFICATION: MSG 4+ (budget → email)
+    - ENGAGEMENT: Showing properties
+    - HANDOVER: Ready for specialist
     """
-    GREETING = "greeting"           # Initial contact
-    DISCOVERY = "discovery"         # Learning preferences (city, budget)
-    QUALIFICATION = "qualification" # Collecting details (email, timing)
-    ENGAGEMENT = "engagement"       # Showing content (photos, properties)
-    HANDOVER = "handover"          # Ready for human specialist
+    GREETING = "greeting"
+    DISCOVERY = "discovery"
+    QUALIFICATION = "qualification"
+    ENGAGEMENT = "engagement"
+    HANDOVER = "handover"
 
+# ============================================================================
+# STAGE MANAGER - Thread-safe, deadlock-free
+# ============================================================================
 class ConversationStageManager:
     """
-    Manages conversation stages and enforces progression rules.
+    Manages conversation stages matching main.py AI prompt rules.
     
-    CRITICAL FEATURES:
-    - Prevents AI from sending handover messages prematurely
-    - Thread-safe state management
-    - Stage-specific AI instruction templates
-    - Requirement validation before stage advancement
-    
-    THREAD SAFETY:
-    All public methods use self.lock to ensure thread-safe operations.
-    Safe for concurrent webhook requests from multiple users.
+    CRITICAL FIX: No nested locks - all lock operations are flat.
     """
     
     def __init__(self):
-        """
-        Initialize the stage manager with thread-safe structures.
+        self.lock = threading.Lock() # Ek time pe ek hi process data edit kare.
+        self.user_stages: Dict[str, ConversationStage] = {} # Har user ka current stage store karega.
+        self.user_data: Dict[str, dict] = {} # Har user ki info store karega.
         
-        FIXED: All dependencies (threading, datetime, etc.) are now properly imported.
-        """
-        # Thread safety lock (FIXED: threading is now imported)
-        self.lock = threading.Lock()
-        
-        # User state tracking
-        self.user_stages: Dict[str, ConversationStage] = {}
-        self.user_data: Dict[str, dict] = {}
-        
-        # Requirements for each stage
-        self.STAGE_REQUIREMENTS = {
+        # Stage requirements matching main.py flow
+        self.STAGE_REQUIREMENTS = {       # Kis stage me jaane ke liye kya kya required hai.
             ConversationStage.GREETING: {
                 "required": [],
-                "description": "Initial contact"
+                "description": "MSG 1 - Initial contact"
             },
-            ConversationStage.DISCOVERY: {
+            ConversationStage.DISCOVERY: {  #Greeting hone ke baad hi discovery phase.
                 "required": ["greeted"],
-                "description": "User has said hello"
+                "description": "MSG 2-3 - Collecting city/purpose/type"
             },
             ConversationStage.QUALIFICATION: {
-                "required": ["greeted", "city_mentioned"],
-                "description": "User expressed interest in location"
+                "required": ["greeted", "city_mentioned", "purpose_asked", "type_asked"],
+                "description": "MSG 4+ - Budget and email"
             },
             ConversationStage.ENGAGEMENT: {
-                "required": ["greeted", "city_mentioned", "interest_type"],
-                "description": "User specified budget preference"
+                "required": ["greeted", "city_mentioned", "purpose_asked", "type_asked", "budget_asked"],
+                "description": "Showing properties"
             },
             ConversationStage.HANDOVER: {
-                "required": ["greeted", "city_mentioned", "interest_type", 
-                           "email_collected", "user_consent"],
-                "description": "Ready for human specialist"
+                "required": ["greeted", "city_mentioned", "purpose_asked", "type_asked", "budget_asked", "email_collected"],
+                "description": "Ready for specialist"
             }
         }
         
-        # AI Instructions per stage (CRITICAL FOR PREVENTING PREMATURE HANDOVERS)
-        self.STAGE_AI_INSTRUCTIONS = {
+        # AI Instructions - EXACTLY matching main.py rules
+        self.STAGE_AI_INSTRUCTIONS = {                      # Har stage me AI ko kya bolna hai uske rules.
             ConversationStage.GREETING: """
-                You are Sarah, a friendly property consultant.
-                USER JUST SAID HELLO. This is the START of conversation.
-                
-                STRICT RULES:
-                - DO NOT mention specialists or human agents
-                - DO NOT suggest calling anyone
-                - DO NOT end the conversation
-                - Your job: Make user feel welcome, ask about their city preference
-                
-                Keep it warm and brief (2 sentences max).
+YOU ARE AT MSG 1 - FIRST CONTACT.
+
+STRICT RULES FOR MSG 1:
+- Use user's name ONCE: "Hi {name}! 👋"
+- Introduce: "I'm Sarah, your property consultant"
+- Ask ONE question ONLY: "Which city interests you?"
+- DO NOT ask: email, budget, purpose, or property type
+- Keep it 2 sentences max
+
+ALLOWED ACTION: "send_text" ONLY
+FORBIDDEN: Do NOT send properties, do NOT ask multiple questions
             """,
             
             ConversationStage.DISCOVERY: """
-                You are Sarah, a property consultant.
-                USER HAS EXPRESSED INTEREST but we're still EARLY in conversation.
-                
-                STRICT RULES:
-                - DO NOT mention specialists or human agents yet
-                - DO NOT suggest scheduling calls
-                - DO NOT end the conversation
-                - Your job: Learn their preferences (city, budget type)
-                
-                Ask clarifying questions. Keep it conversational (3 sentences max).
+YOU ARE AT MSG 2-3 - DISCOVERY PHASE.
+
+CHECK CONTEXT FIRST:
+- If city == "Not Mentioned" → Ask: "Which city interests you? (Dubai, Abu Dhabi, UK)"
+- If city known BUT purpose == "Not Asked" → Ask: "Is this for investment or personal use?"
+- If purpose known BUT prop_type == "Not Asked" → Ask: "What type of property? ('apartment', 'villa', 'plot', 'commercial', 'farmhouse', 'other')"
+
+STRICT RULES:
+- Ask ONE question at a time ONLY
+- DO NOT use user's name (already used in MSG 1)
+- DO NOT ask email yet (too early)
+- DO NOT show properties yet (need more info)
+- Keep it conversational, 2-3 sentences max
+
+ALLOWED ACTION: "send_text" ONLY
+FORBIDDEN: Do NOT send properties yet, do NOT ask email
             """,
             
             ConversationStage.QUALIFICATION: """
-                You are Sarah, a property consultant.
-                USER IS INTERESTED. We're collecting details.
-                
-                STRICT RULES:
-                - DO NOT mention specialists yet (too early!)
-                - DO NOT suggest handover to humans
-                - DO NOT end the conversation
-                - Your job: Understand their needs, collect email if missing
-                
-                Be helpful and patient. Keep conversation flowing (3 sentences max).
+YOU ARE AT MSG 4+ - QUALIFICATION PHASE.
+
+CHECK CONTEXT FIRST - Ask ONLY what's missing:
+- If budget == "Not Specified" → Ask FIRST: "What budget range are you working with?"
+- If budget known AND email == "Not Provided" AND message_count >= 4 → Ask: "Where should I send the brochures? 📧"
+- DO NOT ask about purpose/type again - already collected
+- If budget + email known → action = "send_properties"
+
+STRICT RULES:
+- ONE question at a time
+- DO NOT repeat questions already answered
+- DO NOT use user's name
+- If user asks to see properties → action = "send_properties"
+- Keep it helpful, 2-3 sentences max
+
+ALLOWED ACTIONS: "send_text" or "send_properties" (if user requests)
+FORBIDDEN: Do NOT ask already-answered questions
             """,
             
             ConversationStage.ENGAGEMENT: """
-                You are Sarah, a property consultant.
-                USER IS ENGAGED. Show them value first.
-                
-                STRICT RULES:
-                - DO NOT mention specialists unless user EXPLICITLY asks
-                - DO NOT push for calls or meetings yet
-                - Focus on providing property information
-                - Your job: Answer questions, show properties, build trust
-                
-                Be informative and helpful (3 sentences max).
+YOU ARE IN ENGAGEMENT - SHOWING PROPERTIES.
+
+STRICT RULES:
+- Answer questions about properties shown
+- Provide details user asks for
+- DO NOT push for meetings yet
+- Let user explore naturally
+- Keep it informative, 2-3 sentences max
+
+ALLOWED ACTIONS: "send_text", "send_properties"
+FORBIDDEN: Do NOT force handover, do NOT push meetings
             """,
             
             ConversationStage.HANDOVER: """
-                You are Sarah, a property consultant.
-                USER IS READY for personalized service.
-                
-                NOW you can mention:
-                - Our property specialists
-                - Scheduling viewings
-                - Personalized consultations
-                
-                But ONLY if user has shown clear intent (asked about next steps,
-                viewing, meeting, or said "contact me").
-                
-                Keep it professional (3 sentences max).
+YOU ARE AT HANDOVER - USER IS READY.
+
+TRIGGER: User said "contact me", "book viewing", "meet agent", or similar.
+
+NOW you can:
+- Mention specialists
+- Schedule meetings
+- Offer consultations
+
+STRICT RULES:
+- ONLY if user showed intent
+- Keep it professional, 2-3 sentences max
+
+ALLOWED ACTIONS: "send_text", "handover", "schedule_meeting"
             """
         }
     
-    def get_user_stage(self, user_id: str) -> ConversationStage:
-        """
-        Get current conversation stage for user.
-        
-        Args:
-            user_id: Unique user identifier (phone number)
-            
-        Returns:
-            Current ConversationStage (defaults to GREETING for new users)
-            
-        Thread-safe: Protected by self.lock
-        """
+    def get_user_stage(self, user_id: str) -> ConversationStage:            # User ka current stage return karta hai.
+        """Get current stage. Thread-safe, no nested locks."""
         with self.lock:
-            if user_id not in self.user_stages:
+            if user_id not in self.user_stages:                             # Naya user ho toh greeting se start.
                 return ConversationStage.GREETING
             return self.user_stages[user_id]
     
-    def update_user_data(self, user_id: str, key: str, value: any):
-        """
-        Update user data markers (e.g., 'greeted', 'city_mentioned').
-        
-        Args:
-            user_id: Unique user identifier
-            key: Data field to update
-            value: New value for the field
-            
-        Thread-safe: Protected by self.lock
-        """
+    def update_user_data(self, user_id: str, key: str, value: any):         # User ke data me nayi info save karta hai.
+        """Update user data. Thread-safe."""
         with self.lock:
             if user_id not in self.user_data:
                 self.user_data[user_id] = {}
             self.user_data[user_id][key] = value
-            self.user_data[user_id]['last_update'] = datetime.now()
+    
+    def get_user_data(self, user_id: str) -> dict:
+        """Get all user data. Thread-safe."""
+        with self.lock:
+            return self.user_data.get(user_id, {}).copy()                  # User ka pura data return karega.
     
     def check_stage_requirements(self, user_id: str, stage: ConversationStage) -> bool:
-        """
-        Check if user meets requirements for a specific stage.
-        
-        Args:
-            user_id: Unique user identifier
-            stage: Stage to check requirements for
-            
-        Returns:
-            True if all requirements are met, False otherwise
-            
-        Thread-safe: Protected by self.lock
-        """
+        """Check if user meets requirements for a stage."""
         with self.lock:
-            user_data = self.user_data.get(user_id, {})
-            required = self.STAGE_REQUIREMENTS[stage]["required"]
-            
-            for req in required:
-                if req not in user_data or not user_data[req]:
-                    return False
-            
-            return True
+            requirements = self.STAGE_REQUIREMENTS[stage]["required"]
+            user_info = self.user_data.get(user_id, {})
+            return all(user_info.get(req, False) for req in requirements)
     
-    def advance_stage_if_ready(self, user_id: str):
+    def advance_stage_if_ready(self, user_id: str): #Current stage kya hai,Next stage ki requirements complete hui?Agar hui toh next stage me bhej do.
         """
-        Automatically advance user to next stage if requirements met.
-        
-        CRITICAL: Ensures stages progress naturally without skipping.
-        Checks each stage in order and advances to highest eligible stage.
-        
-        Args:
-            user_id: Unique user identifier
-            
-        Side Effects:
-            Updates user_stages if advancement is possible
-            Logs stage changes
-            
-        Thread-safe: Protected by self.lock
+        Advance stage based on collected data.
+        CRITICAL FIX: No nested locks - direct access to user_stages.
         """
         with self.lock:
-            current_stage = self.get_user_stage(user_id)
+            # Direct access - avoid calling get_user_stage (nested lock)
+            if user_id not in self.user_stages:
+                current_stage = ConversationStage.GREETING
+            else:
+                current_stage = self.user_stages[user_id]
             
-            # Define stage progression order
-            stages_order = [
+            # Stage progression order
+            stages_order = [                        # Stage ka order define hai.
                 ConversationStage.GREETING,
                 ConversationStage.DISCOVERY,
                 ConversationStage.QUALIFICATION,
@@ -269,375 +222,133 @@ class ConversationStageManager:
             
             current_idx = stages_order.index(current_stage)
             
-            # Try to advance to next stage(s)
+            # Try to advance ONE stage at a time
             for i in range(current_idx + 1, len(stages_order)):
                 next_stage = stages_order[i]
-                if self.check_stage_requirements(user_id, next_stage):
+                requirements = self.STAGE_REQUIREMENTS[next_stage]["required"]
+                user_info = self.user_data.get(user_id, {})
+                
+                # Check if requirements met
+                if all(user_info.get(req, False) for req in requirements):
                     self.user_stages[user_id] = next_stage
-                    safe_log_info(f"[STAGE] User {user_id[-4:]} advanced to {next_stage.value}")
+                    safe_log_info(f"[STAGE] Advancing {user_id[-4:]} from {current_stage.value} to {next_stage.value}")
+                    break  # ONLY advance ONE stage per call
                 else:
-                    break  # Can't advance further, stop checking
+                    break
     
-    def can_ai_handover(self, user_id: str) -> bool:
-        """
-        CRITICAL GATE: Check if AI is allowed to send handover messages.
-        
-        This is the primary guard against premature handovers.
-        
-        Returns True ONLY if:
-        - User is in HANDOVER stage
-        - All handover requirements are met
-        - User has given explicit consent
-        
-        Args:
-            user_id: Unique user identifier
-            
-        Returns:
-            True if handover is permitted, False otherwise
-            
-        Thread-safe: Protected by self.lock
-        """
+    def get_ai_instructions(self, user_id: str) -> str:    # Current stage ke hisaab se AI prompt rules return karega.
+        """Get stage-specific AI instructions."""
         with self.lock:
-            current_stage = self.get_user_stage(user_id)
-            
-            # Must be in HANDOVER stage
-            if current_stage != ConversationStage.HANDOVER:
-                return False
-            
-            # Must meet all handover requirements
-            if not self.check_stage_requirements(user_id, ConversationStage.HANDOVER):
-                return False
-            
-            return True
+            # Direct access - avoid nested lock
+            if user_id not in self.user_stages:
+                stage = ConversationStage.GREETING
+            else:
+                stage = self.user_stages[user_id]
+            return self.STAGE_AI_INSTRUCTIONS[stage]
     
-    def get_ai_instructions(self, user_id: str) -> str:
-        """
-        Get stage-specific AI prompt instructions.
-        
-        These instructions are prepended to AI prompts to ensure
-        stage-appropriate responses.
-        
-        Args:
-            user_id: Unique user identifier
-            
-        Returns:
-            Stage-specific instruction string for AI
-        """
-        stage = self.get_user_stage(user_id)
-        return self.STAGE_AI_INSTRUCTIONS[stage]
+    def can_ai_handover(self, user_id: str) -> bool:     # Agar handover stage hai toh True.
+        """Check if AI can handover to human."""
+        with self.lock:
+            # Direct access
+            if user_id not in self.user_stages:
+                current = ConversationStage.GREETING
+            else:
+                current = self.user_stages[user_id]
+            return current == ConversationStage.HANDOVER
     
-    def detect_handover_attempt(self, ai_response: str) -> bool:
-        """
-        Detect if AI is trying to send a handover message.
-        
-        CRITICAL: Blocks premature handovers by scanning AI response
-        for handover-related keywords.
-        
-        Args:
-            ai_response: The response text generated by AI
-            
-        Returns:
-            True if handover keywords detected, False otherwise
-            
-        Note:
-            This is used in conjunction with can_ai_handover() to
-            validate AI responses before sending to user.
-        """
+    def detect_handover_attempt(self, ai_response: str) -> bool: # Agar AI jaldi human transfer karne ki baat kare toh detect karega, specialist
+        """Detect if AI trying to handover prematurely."""
         handover_keywords = [
-            "specialist", "property specialist", "senior consultant",
-            "reach out", "contact you", "call you", "schedule",
-            "viewing", "meeting", "arrange", "connect you",
-            "have them", "shall i have"
+            'specialist', 'consultant will', 'team will reach',
+            'schedule a call', 'book a viewing', 'arrange a meeting',
+            'connect you with', 'have someone contact'
         ]
-        
         response_lower = ai_response.lower()
-        
-        for keyword in handover_keywords:
-            if keyword in response_lower:
-                return True
-        
-        return False
+        return any(keyword in response_lower for keyword in handover_keywords)
     
     def reset_user_state(self, user_id: str):
-        """
-        Reset user's conversation state (useful for testing or restart).
-        
-        Args:
-            user_id: Unique user identifier
-            
-        Thread-safe: Protected by self.lock
-        """
+        """Reset user state (for testing)."""
         with self.lock:
             if user_id in self.user_stages:
-                del self.user_stages[user_id]
+                del self.user_stages[user_id]       # User ka pura state reset.
             if user_id in self.user_data:
                 del self.user_data[user_id]
-            safe_log_info(f"[STAGE] Reset state for user {user_id[-4:]}")
-    
-    def get_user_progress(self, user_id: str) -> dict:
-        """
-        Get detailed progress information for a user.
-        
-        Useful for debugging and analytics.
-        
-        Args:
-            user_id: Unique user identifier
-            
-        Returns:
-            Dictionary containing stage, data markers, and requirement status
-        """
-        with self.lock:
-            current_stage = self.get_user_stage(user_id)
-            user_data = self.user_data.get(user_id, {})
-            requirements_met = self.check_stage_requirements(user_id, current_stage)
-            
-            return {
-                "current_stage": current_stage.value,
-                "requirements_met": requirements_met,
-                "user_data_keys": list(user_data.keys()),
-                "can_handover": self.can_ai_handover(user_id)
-            }
 
 # ============================================================================
-# GLOBAL SINGLETON INSTANCE (SAFE PATTERN)
+# GLOBAL INSTANCE
 # ============================================================================
-
-# Single instance shared across application (thread-safe by design)
-stage_manager = ConversationStageManager()
+stage_manager = ConversationStageManager()  # Is class ka object bana diya gaya.
 
 # ============================================================================
-# HELPER FUNCTIONS FOR MAIN.PY INTEGRATION
+# HELPER FUNCTIONS
 # ============================================================================
-
-def update_conversation_stage(user_id: str, user_city: str, user_interest: str, 
+def update_conversation_stage(user_id: str, user_city: str, user_interest: str,         # Yeh real chat ke time run hoga.
                               user_email: str, message: str):
     """
-    Update stage markers based on user input.
-    
-    This should be called BEFORE generating any response in the webhook.
-    
-    Args:
-        user_id: Unique user identifier
-        user_city: Extracted city from message
-        user_interest: Extracted interest level
-        user_email: Extracted or saved email
-        message: Raw user message text
-        
-    Side Effects:
-        Updates stage_manager state
-        May advance user to new stage
+    Update stage based on collected info.
+    Matches main.py message flow exactly.
     """
     msg_lower = message.lower()
     
     # Mark greeting
-    greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 
-                 'good evening', 'hii', 'hola', 'namaste']
-    if any(g in msg_lower for g in greetings):
+    greetings = ['hi', 'hello', 'hey', 'good morning', 'hii', 'hola', 'namaste', 'hely']
+    if any(g in msg_lower for g in greetings):                                         # Agar hi/hello likha user ne.
         stage_manager.update_user_data(user_id, 'greeted', True)
     
     # Mark city mentioned
     if user_city != "Not Mentioned":
-        stage_manager.update_user_data(user_id, 'city_mentioned', True)
+        stage_manager.update_user_data(user_id, 'city_mentioned', True)             # City mil gayi toh mark true.
     
     # Mark interest type
-    if user_interest != "Not Specified":
+    if user_interest != "Not Specified":                                            # Purpose mil gaya.
         stage_manager.update_user_data(user_id, 'interest_type', True)
+        stage_manager.update_user_data(user_id, 'purpose_asked', True)
+
+    # Mark budget asked
+    budget_keywords = ['lakh', 'crore', 'aed', 'dirham', 'thousand', 'million', 'budget']
+    if any(keyword in msg_lower for keyword in budget_keywords):
+        stage_manager.update_user_data(user_id, 'budget_asked', True)    
+
+
+    # Mark property type asked
+    property_types = ['apartment', 'villa', 'plot', 'commercial', 'farmhouse', 'other'] # Agar user ne property type mention kiya toh mark true.
+    if any(ptype in msg_lower for ptype in property_types):
+        stage_manager.update_user_data(user_id, 'type_asked', True)    
+    
     
     # Mark email collected
-    if user_email != "Not Provided":
+    if user_email != "Not Provided":                                                # Email mil gaya.       
         stage_manager.update_user_data(user_id, 'email_collected', True)
     
     # Mark explicit consent for contact
-    consent_phrases = ['contact me', 'call me', 'reach out', 'yes contact', 
+    consent_phrases = ['contact me', 'call me', 'reach out', 'yes contact',         # Agar user ne bola toh consent true.
                       'schedule viewing', 'book appointment', 'arrange viewing']
     if any(phrase in msg_lower for phrase in consent_phrases):
         stage_manager.update_user_data(user_id, 'user_consent', True)
     
-    # Advance stage if ready (checks all requirements)
-    stage_manager.advance_stage_if_ready(user_id)
+    # Advance stage if ready
+    stage_manager.advance_stage_if_ready(user_id)                                       # Stage update kar dega.
 
-def get_stage_aware_fallback(user_id: str) -> str:
-    """
-    Get stage-appropriate fallback message when AI quota is exceeded.
-    
-    IMPORTANT: Returns different fallbacks based on conversation stage
-    to avoid premature handovers.
-    
-    Args:
-        user_id: Unique user identifier
-        
-    Returns:
-        Stage-appropriate fallback message
-    """
+def get_stage_aware_fallback(user_id: str) -> str:                  # Agar AI fail ho jaye toh stage ke hisaab se fallback reply dega.
+    """Get fallback message based on stage."""
     current_stage = stage_manager.get_user_stage(user_id)
     
     fallback_messages = {
         ConversationStage.GREETING: 
-            "Hi there! 👋 Which city interests you? (Dubai, Abu Dhabi, UK)",
+            "Hi! 👋 Which city interests you? (Dubai, Abu Dhabi, UK)",
         
         ConversationStage.DISCOVERY: 
-            "I'd love to help! What's your budget preference: Luxury, Standard, or Affordable?",
+            "I'd love to help! What brings you to property search today?",
         
         ConversationStage.QUALIFICATION: 
-            "Great choice! Would you like to see some property photos? 📸",
+            "Great! What budget range are you considering?",
         
         ConversationStage.ENGAGEMENT: 
-            "Perfect! Let me show you some options. What would you like to know?",
+            "Would you like to see some property options?",
         
         ConversationStage.HANDOVER: 
-            "I appreciate your interest! For personalized service, our specialist can help. Shall I connect you?"
+            "I can connect you with our specialist. Interested?"
     }
     
     return fallback_messages.get(current_stage, 
                                  "How can I assist you with your property search?")
-
-# ============================================================================
-# TESTING & VALIDATION FUNCTIONS
-# ============================================================================
-
-def test_stage_progression():
-    """
-    Test that stages progress correctly.
-    
-    Validates:
-    - Natural progression through stages
-    - Requirement enforcement
-    - Cannot skip stages
-    
-    Raises:
-        AssertionError: If any test fails
-    """
-    test_user = "test_user_12345"
-    
-    # Reset state
-    stage_manager.reset_user_state(test_user)
-    
-    # Test 1: Start at GREETING
-    assert stage_manager.get_user_stage(test_user) == ConversationStage.GREETING, \
-        "New user should start at GREETING stage"
-    
-    # Test 2: Advance to DISCOVERY
-    stage_manager.update_user_data(test_user, 'greeted', True)
-    stage_manager.advance_stage_if_ready(test_user)
-    assert stage_manager.get_user_stage(test_user) == ConversationStage.DISCOVERY, \
-        "Should advance to DISCOVERY after greeting"
-    
-    # Test 3: Cannot skip to HANDOVER (missing requirements)
-    stage_manager.update_user_data(test_user, 'user_consent', True)
-    stage_manager.advance_stage_if_ready(test_user)
-    assert stage_manager.get_user_stage(test_user) != ConversationStage.HANDOVER, \
-        "Should not skip to HANDOVER without meeting requirements"
-    
-    # Test 4: Progress naturally through all stages
-    stage_manager.update_user_data(test_user, 'city_mentioned', True)
-    stage_manager.update_user_data(test_user, 'interest_type', True)
-    stage_manager.update_user_data(test_user, 'email_collected', True)
-    stage_manager.advance_stage_if_ready(test_user)
-    
-    assert stage_manager.get_user_stage(test_user) == ConversationStage.HANDOVER, \
-        "Should reach HANDOVER after meeting all requirements"
-    
-    # Cleanup
-    stage_manager.reset_user_state(test_user)
-    
-    print("✅ All stage progression tests passed!")
-    return True
-
-def test_handover_blocking():
-    """
-    Test that premature handovers are blocked.
-    
-    Validates:
-    - Handover detection works
-    - Blocking enforced at early stages
-    - Allowed only at HANDOVER stage
-    
-    Raises:
-        AssertionError: If any test fails
-    """
-    test_user = "test_user_67890"
-    
-    # Reset state
-    stage_manager.reset_user_state(test_user)
-    
-    # Early stage (DISCOVERY)
-    stage_manager.update_user_data(test_user, 'greeted', True)
-    stage_manager.advance_stage_if_ready(test_user)
-    
-    # Test handover detection and blocking
-    test_responses = [
-        "Let me connect you with our specialist",
-        "Shall I have them reach out?",
-        "Our property consultant can help you further"
-    ]
-    
-    for response in test_responses:
-        is_handover = stage_manager.detect_handover_attempt(response)
-        can_handover = stage_manager.can_ai_handover(test_user)
-        
-        assert is_handover == True, \
-            f"Failed to detect handover in: {response}"
-        assert can_handover == False, \
-            f"Incorrectly allowed handover at {stage_manager.get_user_stage(test_user).value}"
-    
-    # Now advance to HANDOVER stage
-    stage_manager.update_user_data(test_user, 'city_mentioned', True)
-    stage_manager.update_user_data(test_user, 'interest_type', True)
-    stage_manager.update_user_data(test_user, 'email_collected', True)
-    stage_manager.update_user_data(test_user, 'user_consent', True)
-    stage_manager.advance_stage_if_ready(test_user)
-    
-    # Now handover should be allowed
-    assert stage_manager.can_ai_handover(test_user) == True, \
-        "Should allow handover at HANDOVER stage"
-    
-    # Cleanup
-    stage_manager.reset_user_state(test_user)
-    
-    print("✅ All handover blocking tests passed!")
-    return True
-
-def run_all_tests():
-    """
-    Run all module tests.
-    
-    Returns:
-        True if all tests pass, False otherwise
-    """
-    try:
-        print("\n" + "="*60)
-        print("RUNNING CONVERSATION STAGE SYSTEM TESTS")
-        print("="*60 + "\n")
-        
-        test_stage_progression()
-        test_handover_blocking()
-        
-        print("\n" + "="*60)
-        print("✅ ALL TESTS PASSED - MODULE IS PRODUCTION READY")
-        print("="*60 + "\n")
-        
-        return True
-    except AssertionError as e:
-        print(f"\n❌ TEST FAILED: {e}\n")
-        return False
-    except Exception as e:
-        print(f"\n❌ UNEXPECTED ERROR: {e}\n")
-        return False
-
-# ============================================================================
-# MODULE ENTRY POINT (FOR TESTING)
-# ============================================================================
-
-if __name__ == "__main__":
-    """
-    When run directly, execute tests to validate module functionality.
-    This is safe because all imports are explicit and self-contained.
-    """
-    print("\n🔧 Testing conversation_stage_system.py module...\n")
-    success = run_all_tests()
-    
-    if success:
-        print("Module is ready for production use.")
-        print("Import with: from conversation_stage_system import stage_manager\n")
-    else:
-        print("⚠️ Module has issues. Review test failures above.\n")

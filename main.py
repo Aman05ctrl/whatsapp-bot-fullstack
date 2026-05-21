@@ -32,12 +32,76 @@ from dotenv import load_dotenv
 import logging
 import time
 import threading
+from conversation_stage_system import (
+    stage_manager,
+    update_conversation_stage,
+    get_stage_aware_fallback
+)
 from google.api_core import exceptions as google_exceptions
 from collections import defaultdict
 from typing import Dict, Set, Optional, Tuple, List  # FIX ISSUE 1
 import uuid
 from queue import Queue, Empty  # FIX ISSUE 1
 from dataclasses import dataclass
+from email_service import send_villa_enquiry_notification, send_meeting_confirmation
+from calendar_service import format_meeting_calendar_link
+from conversation_flow import ConversationFlow, FlowState
+from property_handler import format_property_caption, get_property_images
+import threading as _threading_for_flows
+from datetime import datetime as _dt_for_flows, timedelta as _td_for_flows
+
+class _ActiveFlowsStore:
+    """Thread-safe dict with TTL-based cleanup (prevents memory leak at scale)"""
+    def __init__(self, ttl_hours=24):
+        self._data = {}
+        self._last_touch = {}
+        self._lock = _threading_for_flows.Lock()
+        self._ttl = _td_for_flows(hours=ttl_hours)
+        self._last_cleanup = _dt_for_flows.now()
+    
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._data
+    
+    def __getitem__(self, key):
+        with self._lock:
+            self._last_touch[key] = _dt_for_flows.now()
+            return self._data[key]
+    
+    def __setitem__(self, key, value):
+        with self._lock:
+            self._data[key] = value
+            self._last_touch[key] = _dt_for_flows.now()
+            # Cleanup every 5 minutes (not on every set — too expensive)
+            if (_dt_for_flows.now() - self._last_cleanup).total_seconds() > 300:
+                self._cleanup()
+                self._last_cleanup = _dt_for_flows.now()
+    
+    def get(self, key, default=None):
+        with self._lock:
+            if key in self._data:
+                self._last_touch[key] = _dt_for_flows.now()
+                return self._data[key]
+            return default
+    
+    def _cleanup(self):
+        """Remove entries idle longer than TTL"""
+        now = _dt_for_flows.now()
+        expired = [k for k, t in self._last_touch.items() if now - t > self._ttl]
+        for k in expired:
+            self._data.pop(k, None)
+            self._last_touch.pop(k, None)
+        if expired:
+            try:
+                logger.info(f"[ACTIVE_FLOWS] Cleaned {len(expired)} idle entries")
+            except Exception:
+                pass
+    
+    def __len__(self):
+        with self._lock:
+            return len(self._data)
+
+ACTIVE_FLOWS = _ActiveFlowsStore(ttl_hours=24)  # auto-cleans entries idle >24h
 
 load_dotenv()
 
@@ -329,7 +393,7 @@ def fetch_properties_from_backend():
 
             # Fetch properties
             props_resp = requests.get(
-            f"{backend_url}/api/properties/?status=active&size=50",
+            f"{backend_url}/api/properties/?status=active&size=500",
                 headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
                 timeout=10
             )
@@ -365,9 +429,33 @@ def fetch_properties_from_backend():
                 })
 
             safe_log_info(f"[PROPERTIES] ✅ Loaded {len(PROPERTIES)} properties for {email}")
-
         except Exception as e:
             safe_log_error(f"[PROPERTIES] Error: {e}")
+
+
+# ─── PROPERTIES AUTO-REFRESH (every 5 minutes) ───
+# Without this: bot must restart to see new properties added by dealer.
+# With this: properties refresh in background, bot stays current.
+def _start_properties_auto_refresh(interval_seconds=300):
+    """Start background thread that re-fetches properties every 5 minutes."""
+    def _refresh_loop():
+        import time as _time
+        while True:
+            _time.sleep(interval_seconds)
+            try:
+                fetch_properties_from_backend()
+                safe_log_info(f"[PROPERTIES] 🔄 Auto-refreshed | count={len(PROPERTIES)}")
+            except Exception as e:
+                safe_log_error(f"[PROPERTIES] Auto-refresh failed: {e}")
+    
+    refresh_thread = threading.Thread(
+        target=_refresh_loop,
+        name="PropertiesAutoRefresh",
+        daemon=True
+    )
+    refresh_thread.start()
+    safe_log_info(f"[PROPERTIES] Auto-refresh started (every {interval_seconds}s)")
+# ============================================================================
 
 # ============================================================================
 # WEBHOOK MESSAGE QUEUE (FIXED ISSUES 1 & 3)
@@ -628,6 +716,8 @@ class WebhookProcessor:
             reply_type_for_log = None  
 
             corr_id = msg.correlation_id
+            # ─── Show typing indicator immediately (best-effort, non-blocking) ───
+            send_typing_indicator(msg.message_id, correlation_id=corr_id)
             
             # Generate fingerprint for debounce check
             country_code_debounce, clean_phone_debounce = format_phone_number(msg.sender_id)
@@ -678,29 +768,63 @@ class WebhookProcessor:
             user_data = get_user_data_once(msg.sender_id)
 
             # Load returning user data from database if state is empty
-            if not conversation_state.get(msg.sender_id, 'city') and BOT_AUTH_TOKEN:
-                try:
-                    existing = requests.get(
-                        f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/leads?phone={msg.sender_id}",
-                        headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                        timeout=5
-                    )
-                    if existing.status_code == 200:
-                        existing_leads = existing.json()
-                        if existing_leads:
-                            lead = existing_leads[0]
-                            if lead.get('city'):
-                                conversation_state.update(msg.sender_id, 'city', lead['city'])
-                            if lead.get('email'):
-                                conversation_state.update(msg.sender_id, 'email', lead['email'])
-                                conversation_state.mark_email_asked(msg.sender_id)
-                            if lead.get('interest'):
-                                conversation_state.update(msg.sender_id, 'interest', lead['interest'])
-                            if lead.get('budget_category'):
-                                conversation_state.update(msg.sender_id, 'budget', lead['budget_category'])
-                            safe_log_info(f"[STATE] ✅ Restored state for returning user {msg.sender_id[-4:]}")
-                except Exception as e:
-                    safe_log_error(f"[STATE] Restore error: {e}")
+
+            user_city = "Not Mentioned"
+            user_interest = "Not Specified"
+            user_email = "Not Provided"
+            user_budget = "Not Specified"
+
+            # ─── MEMORY FEATURE (KILL-SWITCH-CONTROLLED) ───
+            from memory_feature import (
+                is_memory_enabled,
+                get_returning_user_context,
+                build_welcome_back_message,
+                MemoryTier,
+            )
+            
+            memory_context = None
+            welcome_back_text = None
+            
+            if not is_memory_enabled():
+                safe_log_info(f"[MEMORY] ⚠️ DISABLED via kill switch | {corr_id}")
+            elif not conversation_state.get(msg.sender_id, 'city') and BOT_AUTH_TOKEN:
+                # CRM fetch function (returns existing lead data)
+                def _crm_fetch(phone):
+                    try:
+                        resp = requests.get(
+                            f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/leads?phone={phone}",
+                            headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
+                            timeout=5,
+                        )
+                        if resp.status_code == 200:
+                            leads = resp.json()
+                            return leads[0] if leads else None
+                    except Exception as e:
+                        safe_log_warning(f"[MEMORY] CRM fetch error: {e}")
+                    return None
+                
+                # Get memory context (no logs lookup needed — we use CRM 'updated_at' as proxy)
+                memory_context = get_returning_user_context(
+                    user_fingerprint=conversation_state.get(msg.sender_id, 'fingerprint') or "",
+                    user_phone=msg.sender_id,
+                    sheets_logs_fn=None,
+                    crm_fetch_fn=_crm_fetch,
+                    correlation_id=corr_id,
+                )
+                
+                # Apply remembered fields to conversation_state
+                if memory_context["is_returning"]:
+                    for key, val in memory_context["fields"].items():
+                        if val:
+                            conversation_state.update(msg.sender_id, key, val)
+                    safe_log_info(f"[STATE] ✅ Restored state for returning user {msg.sender_id[-4:]}")
+                    safe_log_info(f"[STATE] Stage updated for returning user")
+                
+                # Build welcome-back message (None for SILENT/NEW_USER)
+                welcome_back_text = build_welcome_back_message(
+                    user_name=msg.user_name,
+                    context=memory_context,
+                )
 
             # Extract email
             email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
@@ -709,7 +833,7 @@ class WebhookProcessor:
             if email_match:
                 user_email = email_match.group(0)
             else:
-                 user_email = user_data.get('email', 'Not Provided')    
+                 user_email = conversation_state.get(msg.sender_id, 'email') or "Not Provided"
             
 
             # ✅ NEW: Generate fingerprint for user identification
@@ -736,34 +860,119 @@ class WebhookProcessor:
             if user_city == "Not Mentioned":
                 user_city = conversation_state.get(msg.sender_id, 'city') or user_data.get('city', 'Not Mentioned')
             
-            # Extract interest
-            user_interest = "Not Specified"
-            if "luxury" in msg.text_body.lower():
-                user_interest = "Luxury"
-            elif "standard" in msg.text_body.lower():
-                user_interest = "Standard"
-            elif "budget" in msg.text_body.lower() or "affordable" in msg.text_body.lower():
-                user_interest = "Affordable"
-
-            # Save interest to state (was missing!)
-            if user_interest != "Not Specified":
-                conversation_state.update(msg.sender_id, 'interest', user_interest)
+            # ─── BUILD COMBINED INTEREST: "PropertyType - Purpose" ───
+            # e.g. "Villa - Personal", "Apartment - Investment"
+            # Pulls from flow.data (state machine truth) first, falls back to state, then keywords.
             
-            # Extract budget
-            _, user_budget = budgetqualifier.extract_budget_from_message(msg.text_body)
-            if not user_budget:
-                user_budget = "Not Specified"
+            prop_type_val = None
+            purpose_val = None
+            
+            # Source 1: state machine (most reliable)
+            if msg.sender_id in ACTIVE_FLOWS:
+                flow_data = ACTIVE_FLOWS[msg.sender_id].data
+                prop_type_val = flow_data.get('prop_type')
+                purpose_val = flow_data.get('purpose') or flow_data.get('interest')
+            
+            # Source 2: conversation_state fallback
+            if not prop_type_val:
+                prop_type_val = conversation_state.get(msg.sender_id, 'prop_type')
+            if not purpose_val:
+                purpose_val = conversation_state.get(msg.sender_id, 'interest')
+            
+            # Source 3 (last resort): keyword extraction, only if message has no digits
+            text_lower = msg.text_body.lower()
+            has_number = any(c.isdigit() for c in msg.text_body)
+            if not purpose_val and not has_number:
+                if "investment" in text_lower:
+                    purpose_val = "Investment"
+                elif "personal" in text_lower:
+                    purpose_val = "Personal"
+            if not prop_type_val and not has_number:
+                for ptype in ("villa", "apartment", "commercial", "penthouse", "studio", "townhouse"):
+                    if ptype in text_lower:
+                        prop_type_val = ptype.title()
+                        break
+            
+            # Normalize: purpose to first word ("Personal use" → "Personal"), prop_type to titlecase
+            if purpose_val:
+                purpose_val = str(purpose_val).strip().split()[0].title()
+            if prop_type_val:
+                prop_type_val = str(prop_type_val).strip().title()
+            
+            # Defensive: prevent "Apartment - Apartment" when both slots got the same word
+            # (caused by intent classifier writing prop_type into the purpose slot)
+            if (prop_type_val and purpose_val and 
+                str(prop_type_val).strip().lower() == str(purpose_val).strip().lower()):
+                # Same word in both — trust prop_type, recover purpose from conversation_state explicitly
+                purpose_val = conversation_state.get(msg.sender_id, 'purpose') or None
+            
+            # Build combined string in format "Type - Purpose"
+            if prop_type_val and purpose_val:
+                user_interest = f"{prop_type_val} - {purpose_val}"
+            elif prop_type_val:
+                user_interest = prop_type_val
+            elif purpose_val:
+                user_interest = purpose_val
+            else:
+                user_interest = "Not Specified"
+            
+            # Save individual pieces back to conversation_state for next message
+            if prop_type_val:
+                conversation_state.update(msg.sender_id, 'prop_type', prop_type_val)
+            if purpose_val:
+                conversation_state.update(msg.sender_id, 'interest', purpose_val)
+            
+            # ─── BUDGET: store exact number formatted as "100,000 AED" ───
+            user_budget = "Not Specified"
+            raw_budget = None
+            
+            # Source 1: state machine (real number captured during conversation)
+            if msg.sender_id in ACTIVE_FLOWS:
+                raw_budget = ACTIVE_FLOWS[msg.sender_id].data.get('budget')
+            
+            # Source 2: conversation_state fallback
+            if not raw_budget:
+                raw_budget = conversation_state.get(msg.sender_id, 'budget')
+            
+            # Source 3: extract from current message text
+            if not raw_budget:
+                _, extracted = budgetqualifier.extract_budget_from_message(msg.text_body)
+                raw_budget = extracted
+            
+            # Format as "100,000 AED" with comma separators
+            if raw_budget:
+                try:
+                    # Strip any existing formatting, then re-format cleanly
+                    clean = str(raw_budget).replace(",", "").replace("AED", "").replace("aed", "").strip()
+                    num = int(float(clean))
+                    user_budget = f"{num:,} AED"
+                    # Save the formatted version back to state
+                    conversation_state.update(msg.sender_id, 'budget', user_budget)
+                except (ValueError, TypeError):
+                    # Already formatted or non-numeric — use as-is
+                    user_budget = str(raw_budget)
             
             # Update state
             if user_city != "Not Mentioned":
                 conversation_state.update(msg.sender_id, 'city', user_city)
-            if user_interest != "Not Specified":
-                conversation_state.update(msg.sender_id, 'interest', user_interest)
+            #'interest' is NOT saved here — Fix 2 (line ~847) already saves
+            # the clean 'purpose' piece. Saving the combined "Type - Purpose" string
+            # back would re-corrupt the field and compound to "Apartment - Apartment".
             if user_email != "Not Provided":
                 conversation_state.update(msg.sender_id, 'email', user_email)
                 conversation_state.mark_email_asked(msg.sender_id)
             if user_budget != "Not Specified":
                 conversation_state.update(msg.sender_id, 'budget', user_budget)
+
+                # ================== ✅ FIX: STAGE MANAGER SYNC ==================
+            if user_city != "Not Mentioned":
+                stage_manager.update_user_data(msg.sender_id, "city_mentioned", True)
+
+            if user_interest != "Not Specified":
+                stage_manager.update_user_data(msg.sender_id, "interest_type", True)
+
+            if email_match:
+                stage_manager.update_user_data(msg.sender_id, "email_mentioned", True)
             
             message_count = conversation_state.increment_message_count_once(msg.sender_id)
             
@@ -868,203 +1077,344 @@ class WebhookProcessor:
                     conversation_state.update(msg.sender_id, 'resume_context', None)
                 except Exception:
                     pass
+            # Available property types from database (only available, not sold)
+            available_props = [p for p in PROPERTIES if not p.get('is_sold', False)]
+            prop_types = list(set([p.get('property_type', '').title() for p in available_props if p.get('property_type')]))
+            prop_cities = list(set([p.get('location', '').split(',')[0].strip() for p in available_props if p.get('location')]))
 
-            ai_prompt = f"""You are Sarah, a warm WhatsApp property consultant for Dubai, Abu Dhabi and UK real estate.
-
-CONVERSATION CONTEXT:
-- User name: {msg.user_name}
-- City interest: {user_city}
-- Budget preference: {user_interest}
-- Specific budget: {user_budget}
-- Email collected: {user_email}
-- Message number: {message_count}{resume_context_block}
-- User message: "{msg.text_body}"
-- Available properties in database: {[p['name'] + ' in ' + p['location'] + ' | type:' + p['property_type'] + ' | price:' + str(p['price_aed']) + ' | has_images:True' for p in PROPERTIES]}
-- IMPORTANT: You DO have property photos. Always use send_properties when user asks for photos/images/show me.
-- IMPORTANT: message_count is {message_count}. If message_count > 1, do NOT greet again. Continue the conversation naturally based on what user just said.
-
-AVAILABLE ACTIONS (pick ONE):
-- "send_text"       → reply with text only
-- "send_properties" → reply + send property images. Use this when:
-                      * user asks to "show", "see", "view", "photos", "pictures", "details"
-                      * user says "yes", "sure", "ok", "interested" after you mentioned a property
-                      * user asks about a specific city/type you have in database
-                      * ANY sign of interest in seeing properties — BE AGGRESSIVE with this action
-- "ask_email"       → reply that also asks for email (ONLY if email is "Not Provided" AND message_count >= 3)
-- "handover"        → transfer to human agent (ONLY if user wants to buy, book, or meet agent)
-
-IMPORTANT: When user says yes/sure/ok/interested after property mention → ALWAYS use "send_properties" not "send_text"
-
-STRICT RULES:
-1. Return ONLY valid JSON — no extra text, no markdown, no backticks
-2. reply_text: human, warm, WhatsApp style — max 2-3 short sentences
-3. No bullet points, asterisks, or markdown in reply_text
-4. Max 1-2 emojis in reply_text
-5. Never write long paragraphs
-6. End reply_text with one natural question or next step
-7. include_roi: true ONLY if user explicitly asked about ROI or investment returns
-
-RESPOND WITH EXACTLY THIS JSON:
-{{
-  "action": "send_text",
-  "city": "{user_city}",
-  "reply_text": "your message here",
-  "include_roi": false,
-  "handover_reason": null
-}}"""
-
-            ai_response_raw = call_gemini_with_circuit_breaker(
-                ai_prompt, msg.sender_id, user_city, user_budget, user_interest, correlation_id=corr_id
-            )
-
-            # Parse AI JSON decision
-            action = "send_text"
-            full_reply = ""
-            include_roi = False
-            ai_city = user_city
-            final_handover_reason = handover_reason
-            reply_type_for_log = "AI"
-
-            try:
-                if isinstance(ai_response_raw, dict) and ai_response_raw.get("fallback"):
-                    full_reply = ai_response_raw["text"]
-                    action = "send_text"
-                    reply_type_for_log = "FALLBACK"
-                    safe_log_warning(f"[AI] Gemini fallback triggered | {corr_id}")
-                else:
-                    clean_json = ai_response_raw.strip()
-                    if "```" in clean_json:
-                        clean_json = clean_json.split("```")[1]
-                        if clean_json.startswith("json"):
-                            clean_json = clean_json[4:]
-                    clean_json = clean_json.strip()
-
-                    ai_decision    = json.loads(clean_json)
-                    action         = ai_decision.get("action", "send_text")
-                    full_reply     = ai_decision.get("reply_text", "")
-                    include_roi    = ai_decision.get("include_roi", False)
-                    ai_city        = ai_decision.get("city", user_city)
-                    final_handover_reason = ai_decision.get("handover_reason") or handover_reason
-
-                    if ai_city and ai_city != "Not Mentioned":
-                        conversation_state.update(msg.sender_id, 'city', ai_city)
-
-                    safe_log_info(f"[AI-DECISION] action={action} | roi={include_roi} | city={ai_city} | {corr_id}")
-
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                safe_log_warning(f"[AI-DECISION] JSON parse failed: {e} | raw: {str(ai_response_raw)[:150]}")
-                full_reply = ai_response_raw if isinstance(ai_response_raw, str) else "Let me help you find the perfect property! Which city interests you? 🏙️"
-                action = "send_text"
-                reply_type_for_log = "AI_FALLBACK"
+            # ============================================================================
+            # FIX #2: Get conversation stage and history
+            # ============================================================================
+            current_stage = stage_manager.get_user_stage(msg.sender_id)
+            stage_instruction = stage_manager.get_ai_instructions(msg.sender_id)
+            safe_log_info(f"[STAGE] {current_stage.value} | {corr_id}")
             
-            # ══════════════════════════════════════════════════════════
-            # BACKEND EXECUTES AI DECISION
-            # ══════════════════════════════════════════════════════════
-            safe_log_info(f"[REPLY] TYPE={reply_type_for_log} | action={action} | {corr_id} | User={msg.sender_id[-4:]}")
-
-            # 1. Always send text reply first
-            if full_reply:
-                send_whatsapp_text_with_retry(msg.sender_id, full_reply, correlation_id=corr_id)
-
-            # 2. Send property images if AI decided
-            if action == "send_properties":
-                target_city = ai_city.lower() if ai_city not in ("Not Mentioned", "") else ""
-                found = False
-                for prop in PROPERTIES:
-                    if not target_city or target_city in prop['location'].lower():
-                        # Build rich property caption with all available details
-                        currency = prop.get('currency', 'AED')
-                        price = prop.get('price_aed', 'N/A')
-                        lines = []
-                        lines.append(f"📍 *{prop['name']}*")
-                        lines.append(f"💰 {currency} {price}")
-                        
-                        # Property specs - only add if available
-                        if prop.get('property_type'):
-                            lines.append(f"🏠 Type: {prop['property_type'].title()}")
-                        if prop.get('bedrooms') not in (None, 'N/A'):
-                            lines.append(f"🛏️ Bedrooms: {prop['bedrooms']}")
-                        if prop.get('bathrooms') not in (None, 'N/A'):
-                            lines.append(f"🚿 Bathrooms: {prop['bathrooms']}")
-                        if prop.get('area') not in (None, 'N/A'):
-                            lines.append(f"📐 Area: {prop['area']:,} sqft")
-                        
-                        # Investment details
-                        if include_roi and prop.get('roi') not in (None, 'N/A'):
-                            lines.append(f"📈 ROI: {prop['roi']}")
-                        if prop.get('emi_available'):
-                            lines.append(f"💳 EMI: Available")
-                        
-                        # Location
-                        if prop.get('location', '').strip():
-                            lines.append(f"📌 {prop['location'].strip()}")
-                        
-                        # Description - only if available
-                        if prop.get('description', '').strip():
-                            lines.append(f"\n📝 {prop['description'].strip()}")
-                        
-                        caption = "\n".join(lines)
-                        # Send all images - primary first, then rest in order
-                        all_images = prop.get('all_images', [prop['image_url']])
-                        for i, img_url in enumerate(all_images):
-                            img_caption = caption if i == 0 else ""
-                            safe_log_info(f"[PHOTOS] Sending image {i+1}/{len(all_images)}: {img_url}")
-                            send_whatsapp_image_with_retry(msg.sender_id, img_url, img_caption)
-                        found = True
-                        break
-                if not found:
-                    default_image = "https://images.unsplash.com/photo-1512453979798-5ea904ac6605?q=80&w=1000"
-                    safe_log_info(f"[PHOTOS] Sending default image: {default_image}")
-                    send_whatsapp_image_with_retry(msg.sender_id, default_image, "Premium property 🏙️")
-                safe_log_info(f"[PHOTOS] Sent | city={target_city} | roi={include_roi} | {corr_id}")
-
-            # 3. Mark email asked if AI decided
-            if action == "ask_email" and user_email == "Not Provided":
-                conversation_state.mark_email_asked(msg.sender_id)
-
-            # 4. Handover if AI decided or score triggered
-            handover_triggered = (action == "handover") or (should_handover and not handovermanager.is_handed_over(msg.sender_id))
-            if handover_triggered and not handovermanager.is_handed_over(msg.sender_id):
-                handovermanager.record_handover(msg.sender_id)
-                reason = final_handover_reason or "High-value lead ready for consultation"
-                handover_message = handovermanager.get_handover_message(reason)
-                send_whatsapp_text_with_retry(msg.sender_id, handover_message, correlation_id=corr_id)
-                safe_log_info(f"[HANDOVER] Executed | reason={reason} | {corr_id}")
-
-
-            # ✅ ALWAYS LOG (moved outside if-else)
-            try:
-                log_conversation_to_sheet(
-                    msg.sender_id,
-                    msg.user_name,
+            # Get last 5 messages for context (prevents duplicate questions)
+            history = conversation_state.get_history(msg.sender_id) or []
+            recent_history = history[-5:] if len(history) > 5 else history
+            history_text = "\n".join([
+                f"- {h.get('role', 'unknown')}: {h.get('content', '')}" 
+                for h in recent_history
+            ]) if recent_history else "No previous conversation"
+                       
+            # ════════════════════════════════════════════════════════════
+            # 🚀 NEW STATE-MACHINE FLOW (Replaces 800 lines of AI prompt logic)
+            # ════════════════════════════════════════════════════════════
+            
+            # Get or create flow for this user
+            if msg.sender_id not in ACTIVE_FLOWS:
+                ACTIVE_FLOWS[msg.sender_id] = ConversationFlow(
+                    user_id=msg.sender_id,
+                    user_name=msg.user_name or "there"
+                )
+            
+            flow = ACTIVE_FLOWS[msg.sender_id]
+            
+            # Restore from saved state if needed (for returning users)
+            saved_state = conversation_state.get(msg.sender_id, 'flow_state')
+            saved_data = conversation_state.get(msg.sender_id, 'flow_data')
+            if saved_state and not flow.data.get('city'):
+                try:
+                    flow.state = FlowState(saved_state)
+                    if saved_data and isinstance(saved_data, dict):
+                        flow.data.update(saved_data)
+                    safe_log_info(f"[FLOW] Restored state: {saved_state} | {corr_id}")
+                except Exception as e:
+                    safe_log_warning(f"[FLOW] Restore failed: {e} | {corr_id}")
+            
+            # ─── WELCOME-BACK MESSAGE (only FRIENDLY + CONFIRM have a message) ───
+            if welcome_back_text:
+                send_whatsapp_text_with_retry(
+                    msg.sender_id, welcome_back_text, correlation_id=corr_id
+                )
+                if memory_context and memory_context["tier"] == MemoryTier.CONFIRM:
+                    flow.state = FlowState.RETURNING_USER_CONFIRM
+                    conversation_state.update(msg.sender_id, 'flow_state', flow.state.value)
+                    safe_log_info(f"[MEMORY] Set state to RETURNING_USER_CONFIRM | {corr_id}")
+                    safe_log_info(f"[WORKER] Completed {msg.correlation_id}")
+                    return  # exit early — user must reply yes/no first
+            
+            # ─── FIELD-SKIP (BOTH SILENT AND FRIENDLY tiers benefit) ───
+            # This block runs OUTSIDE the welcome-back guard, so SILENT tier reaches it.
+            # Silent: skip fields without saying anything.
+            # Friendly: skip fields AFTER the welcome-back has been sent above.
+            if memory_context and memory_context["tier"] in (MemoryTier.FRIENDLY, MemoryTier.SILENT):
+                for k, v in memory_context["fields"].items():
+                    flow.data[k] = v
+                # Decide next missing field
+                if not flow.data.get("city"):
+                    flow.state = FlowState.AWAITING_CITY
+                elif not flow.data.get("purpose") and not flow.data.get("interest"):
+                    flow.state = FlowState.AWAITING_PURPOSE
+                elif not flow.data.get("prop_type"):
+                    flow.state = FlowState.AWAITING_TYPE
+                elif not flow.data.get("budget"):
+                    flow.state = FlowState.AWAITING_BUDGET
+                elif not flow.data.get("email"):
+                    flow.state = FlowState.AWAITING_EMAIL
+                else:
+                    flow.state = FlowState.AWAITING_FEEDBACK
+                
+                conversation_state.update(msg.sender_id, 'flow_state', flow.state.value)
+                safe_log_info(f"[MEMORY] {memory_context['tier'].value} tier → jumped to {flow.state.value} | {corr_id}")
+                # Don't return — let the user's message be processed from the correct state
+            
+            # ─── MULTI-LANGUAGE: Detect user's language and translate to English ───
+            # Bot's internal logic works in English. We translate IN and OUT.
+            from translation_service import (
+                detect_language,
+                translate_to_english,
+                translate_from_english,
+                is_translation_enabled,
+            )
+            
+            # 1. Detect language from CURRENT message (don't cache — user might switch languages)
+            # Fall back to saved language only if current message is too short to detect (e.g., "ok", "yes")
+            user_lang = 'en'  # safe default
+            if is_translation_enabled():
+                if len(msg.text_body.strip()) >= 4:
+                    # Long enough to detect reliably — use current message's language
+                    user_lang = detect_language(msg.text_body)
+                    cached_lang = conversation_state.get(msg.sender_id, 'language')
+                    if cached_lang != user_lang:
+                        safe_log_info(f"[TRANSLATE] Language: {cached_lang or 'none'} → {user_lang} | {corr_id}")
+                    conversation_state.update(msg.sender_id, 'language', user_lang)
+                else:
+                    # Short message — use cached language to handle "ok", "yes", numbers
+                    user_lang = conversation_state.get(msg.sender_id, 'language') or 'en'
+                    safe_log_info(f"[TRANSLATE] Short message, using cached: {user_lang} | {corr_id}")
+            
+            # 2. Translate user message to English (if needed) for internal processing
+            message_in_english = msg.text_body
+            if user_lang != 'en' and is_translation_enabled():
+                message_in_english = translate_to_english(
                     msg.text_body,
-                    full_reply,
-                    f"AI:{action}",
-                    corr_id
+                    user_lang=user_lang,
+                    gemini_call_fn=lambda prompt: call_gemini_for_intent(
+                        prompt, user_id=msg.sender_id, correlation_id=corr_id
+                    )
                 )
-            except Exception as e:
-                safe_log_error(f"[LOGS] Failed: {e}")
-
-            # Write log to database
+                safe_log_info(f"[TRANSLATE] {user_lang}→en | original: {msg.text_body[:40]!r} | english: {message_in_english[:40]!r} | {corr_id}")
+            
+            # Process message through state machine (always in English internally)
+            response = flow.handle_message(
+                message=message_in_english,
+                available_properties=PROPERTIES,
+                gemini_call_fn=lambda prompt: call_gemini_for_intent(
+                    prompt, user_id=msg.sender_id, correlation_id=corr_id
+                ),
+                correlation_id=corr_id,
+            )
+            
+            # 3. Translate bot's English response back to user's language (if needed)
+            if user_lang != 'en' and is_translation_enabled() and response and response.text:
+                original_response = response.text
+                response.text = translate_from_english(
+                    response.text,
+                    target_lang=user_lang,
+                    gemini_call_fn=lambda prompt: call_gemini_for_intent(
+                        prompt, user_id=msg.sender_id, correlation_id=corr_id
+                    )
+                )
+                safe_log_info(f"[TRANSLATE] en→{user_lang} | response: {response.text[:40]!r} | {corr_id}")
+            
+            
+            safe_log_info(
+                f"[FLOW] action={response.action} | "
+                f"state={flow.state.value} | {corr_id}"
+            )
+            
+            # ─── EXECUTE FLOW DECISION ───
+            
+            # 1. Send text reply
+            if response.text:
+                send_whatsapp_text_with_retry(
+                    msg.sender_id, response.text, correlation_id=corr_id
+                )
+                # Save to history
+                conversation_state.add_to_history(msg.sender_id, {
+                    "role": "user", "content": msg.text_body
+                })
+                conversation_state.add_to_history(msg.sender_id, {
+                    "role": "assistant", "content": response.text
+                })
+            
+            # 2. Send property images
+            if response.action == "send_property":
+                prop = response.data.get('property')
+                if prop:
+                    caption = format_property_caption(prop, include_roi=True)
+                    images = get_property_images(prop)
+                    
+                    for i, img_url in enumerate(images):
+                        img_caption = caption if i == 0 else ""
+                        safe_log_info(f"[PHOTOS] Sending image {i+1}/{len(images)}")
+                        send_whatsapp_image_with_retry(msg.sender_id, img_url, img_caption)
+                    
+                    safe_log_info(f"[PHOTOS] Sent {len(images)} images | {corr_id}")
+                    
+                    # ✅ FIX: Send follow-up question after images (gender-aware)
+                    import time
+                    time.sleep(0.5)  # Brief delay so question appears AFTER images (WhatsApp delivery ~300ms)
+                    
+                    first_name = msg.user_name.split()[0] if msg.user_name else "there"
+                    name_lower = first_name.lower()
+                    female_names = ['priya', 'aisha', 'fatima', 'sarah', 'maria', 'sara',
+                                   'mary', 'nisha', 'pooja', 'kavya', 'ananya', 'riya', 'oliva',
+                                   'anjali', 'meera', 'neha', 'divya', 'simran']
+                    male_names = ['aman', 'ahmed', 'john', 'raj', 'ali', 'mohammed',
+                                 'rohan', 'arjun', 'vikram', 'rahul', 'suresh', 'amit', 'jack',
+                                 'rohit', 'karan', 'vivek', 'sumit']
+                    
+                    if any(fn in name_lower for fn in female_names):
+                        title = f"Ms. {first_name}"
+                    elif any(mn in name_lower for mn in male_names):
+                        title = f"Mr. {first_name}"
+                    else:
+                        title = first_name
+                    
+                    feedback_msg = (
+                        f"{title}, did you like this property? 😊\n\n"
+                        f"Shall we move forward and schedule a quick call, "
+                        f"or would you like to explore other options?"
+                    )
+                    send_whatsapp_text_with_retry(msg.sender_id, feedback_msg, correlation_id=corr_id)
+                    
+                    # Update flow state to AWAITING_FEEDBACK
+                    flow.state = FlowState.AWAITING_FEEDBACK
+                    safe_log_info(f"[FLOW] Asked feedback - state: AWAITING_FEEDBACK | {corr_id}")
+            
+            # 3. Schedule meeting
+            elif response.action == "schedule_meeting":
+                meeting_data = response.data
+                meeting_date = meeting_data.get('date')
+                meeting_time = meeting_data.get('time')
+                
+                try:
+                    dealer_email = os.getenv('DEALER_EMAIL', '')
+                    
+                    # Loud diagnostics so silent skips never happen again
+                    if not dealer_email:
+                        safe_log_warning(f"[MEETING] ⚠️ DEALER_EMAIL env var not set — skipping email | {corr_id}")
+                    if not meeting_date or not meeting_time:
+                        safe_log_warning(f"[MEETING] ⚠️ Missing date/time (date={meeting_date}, time={meeting_time}) | {corr_id}")
+                    
+                    if dealer_email and meeting_date and meeting_time:
+                        prop = meeting_data.get('property') or {}
+                        cal_link = format_meeting_calendar_link(
+                            client_name=msg.user_name,
+                            property_name=prop.get('name', 'Property'),
+                            property_type=flow.data.get('prop_type', ''),
+                            city=flow.data.get('city', ''),
+                            meeting_date=meeting_date,
+                            meeting_time=meeting_time
+                        )
+                        
+                        # ─── Send email in background so worker doesn't block ───
+                        # Without this: worker blocks 5-10s on SMTP. With this: returns instantly.
+                        def _send_email_async(_corr_id=corr_id):
+                            try:
+                                send_meeting_confirmation(
+                                    dealer_email=dealer_email,
+                                    client_name=msg.user_name,
+                                    client_phone=msg.sender_id,
+                                    client_email=meeting_data.get('email', ''),
+                                    property_name=prop.get('name', 'Property'),
+                                    property_type=flow.data.get('prop_type', ''),
+                                    city=flow.data.get('city', ''),
+                                    meeting_date=meeting_date,
+                                    meeting_time=meeting_time,
+                                    budget=str(meeting_data.get('budget', '')),
+                                    calendar_link=cal_link
+                                )
+                                safe_log_info(f"[MEETING] ✅ Email sent (async) | {_corr_id}")
+                            except Exception as e:
+                                safe_log_error(f"[MEETING] Async email failed: {e} | {_corr_id}")
+                        
+                        threading.Thread(
+                            target=_send_email_async,
+                            name=f"EmailWorker-{corr_id[:8]}",
+                            daemon=True
+                        ).start()
+                        safe_log_info(f"[MEETING] ✅ Confirmed (email queued) | {corr_id}")
+                except Exception as e:
+                    safe_log_error(f"[MEETING] Email send failed: {e}")
+            
+            # 4. Handover to consultant
+            elif response.action == "handover":
+                safe_log_info(f"[HANDOVER] Handed to consultant | {corr_id}")
+            
+            # ─── SAVE FLOW STATE ───
+            conversation_state.update(msg.sender_id, 'flow_state', flow.state.value)
+            conversation_state.update(msg.sender_id, 'flow_data', flow.data)
+            
+            # Backward-compatible field updates
+            if flow.data.get('city'):
+                conversation_state.update(msg.sender_id, 'city', flow.data['city'])
+            if flow.data.get('email'):
+                conversation_state.update(msg.sender_id, 'email', flow.data['email'])
+            if flow.data.get('budget'):
+                conversation_state.update(msg.sender_id, 'budget', flow.data['budget'])
+            if flow.data.get('prop_type'):
+                conversation_state.update(msg.sender_id, 'prop_type', flow.data['prop_type'])
+            
+            # ─── LOG CONVERSATION (TWO DESTINATIONS) ───
+            # 1. Google Sheet "Logs" tab — for dealer's offline access
+            # 2. FastAPI /api/crm/logs — populates the frontend Bot Logs page
             try:
-                log_data = {
-                    "user_name": msg.user_name or "Unknown",
-                    "phone": msg.sender_id,
-                    "user_message": msg.text_body,
-                    "bot_response": full_reply,
-                    "reply_type": f"AI:{action}",
-                }
-                db_log_resp = requests.post(
-                    f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/logs",
-                    json=log_data,
-                    headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
-                    timeout=5
+                # Build reply_type marker: "AI:send_text", "AI:send_property", etc.
+                reply_type = f"AI:{response.action}" if response and response.action else "AI:send_text"
+                bot_response_text = response.text if response and response.text else ""
+                
+                # Extract country code + clean phone from sender_id (e.g., "918470911526")
+                # Strip leading country code if it's India (91), UAE (971), UK (44), etc.
+                sender = str(msg.sender_id)
+                if sender.startswith("91") and len(sender) == 12:
+                    country_code, clean_phone = "+91", sender[2:]
+                elif sender.startswith("971") and len(sender) == 12:
+                    country_code, clean_phone = "+971", sender[3:]
+                elif sender.startswith("44") and len(sender) >= 12:
+                    country_code, clean_phone = "+44", sender[2:]
+                else:
+                    country_code, clean_phone = "", sender
+                
+                # Destination 1: Google Sheet
+                log_conversation_to_sheet(
+                    sender_id=msg.sender_id,
+                    user_name=msg.user_name or "Unknown",
+                    user_message=msg.text_body or "",
+                    bot_response=bot_response_text,
+                    reply_type=reply_type,
+                    correlation_id=corr_id,
                 )
-                if db_log_resp.status_code not in (200, 201):
-                    safe_log_error(f"[DB-LOG] Failed: {db_log_resp.status_code}")
-            except Exception as e:
-                safe_log_error(f"[DB-LOG] Error: {e}")
-
+                
+                # Destination 2: FastAPI bot_logs DB (powers the frontend Logs page)
+                if BOT_AUTH_TOKEN:
+                    try:
+                        log_payload = {
+                            "user_name":    msg.user_name or "Unknown",
+                            "country_code": country_code,
+                            "phone":        clean_phone,
+                            "user_message": (msg.text_body or "")[:500],
+                            "reply_type":   reply_type,
+                            "bot_response": bot_response_text[:500],
+                        }
+                        log_resp = requests.post(
+                            f"{os.getenv('BACKEND_URL', 'http://127.0.0.1:8000')}/api/crm/logs",
+                            json=log_payload,
+                            headers={"Authorization": f"Bearer {BOT_AUTH_TOKEN}"},
+                            timeout=5,
+                        )
+                        if log_resp.status_code in (200, 201):
+                            safe_log_debug(f"[LOGS-DB] ✅ Posted to /api/crm/logs | {corr_id}")
+                        else:
+                            safe_log_warning(f"[LOGS-DB] Failed: {log_resp.status_code} | {log_resp.text[:200]} | {corr_id}")
+                    except Exception as db_err:
+                        safe_log_warning(f"[LOGS-DB] POST error: {db_err} | {corr_id}")
+                        
+            except Exception as log_err:
+                safe_log_warning(f"[LOGS] Failed to log conversation: {log_err} | {corr_id}")
+            
             safe_log_info(f"[WORKER] Completed {msg.correlation_id}")
             
         except Exception as e:
@@ -1394,6 +1744,20 @@ class ConversationState:
             self.states[user_id]['email_asked'] = 'yes'
             self.states[user_id]['last_update'] = datetime.now()
 
+    def get_history(self, user_id: str) -> list:
+        with self.lock:
+            return self.states.get(user_id, {}).get('history', [])  
+
+    def add_to_history(self, user_id: str, message: dict):
+        with self.lock:
+            if 'history' not in self.states[user_id]:
+                self.states[user_id]['history'] = []
+            
+            self.states[user_id]['history'].append(message)
+
+            # Limit history to last 10 messages (important)
+            self.states[user_id]['history'] = self.states[user_id]['history'][-10:]         
+
     def should_gently_remind_email(self, user_id: str, user_email: str) -> bool:
         """
         Check if we should gently remind user about email (2nd attempt only)
@@ -1520,6 +1884,39 @@ def should_use_ai(message: str, user_city: str, user_interest: str, user_budget:
     
     # Default: block AI (prefer templates)
     return False    
+
+def send_typing_indicator(to_message_id: str, correlation_id: str = "N/A") -> bool:
+    """
+    Show the 'typing...' three-dot indicator + mark user's message as read.
+    Auto-dismisses after 25s OR when our reply is sent (whichever first).
+    Reuses global PHONE_NUMBER_ID and WHATSAPP_TOKEN. Best-effort, never raises.
+    """
+    if not to_message_id:
+        return False
+    url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": to_message_id,
+        "typing_indicator": {"type": "text"}
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=5)
+        if response.status_code == 200:
+            safe_log_info(f"[TYPING] ✅ Indicator shown | {correlation_id}")
+            return True
+        safe_log_warning(
+            f"[TYPING] ⚠️ Failed {response.status_code} | "
+            f"Body: {response.text[:150]} | {correlation_id}"
+        )
+        return False
+    except Exception as e:
+        safe_log_warning(f"[TYPING] ⚠️ Exception: {e} | {correlation_id}")
+        return False
 
 # ============================================================================
 # WHATSAPP API WITH RETRY
@@ -1822,7 +2219,7 @@ def call_gemini_with_circuit_breaker(prompt: str, user_id: str, user_city: str =
     # if cached_response:
     #     safe_log_debug(f"[GEMINI] {correlation_id} | Cache hit for {user_id[-4:]}")
     #     return cached_response
-    
+
     can_use, remaining = ai_usage_tracker.can_use_ai(user_id)
     if not can_use:
         safe_log_warning(f"[GEMINI] {correlation_id} | {user_id[-4:]} exceeded quota")
@@ -1843,7 +2240,10 @@ def call_gemini_with_circuit_breaker(prompt: str, user_id: str, user_city: str =
         # Acquire semaphore to limit concurrent Gemini calls
         GEMINI_CONCURRENCY_LIMIT.acquire()
         try:
-            response = model.generate_content(prompt)
+            response = model.generate_content(
+            prompt,
+            request_options={"timeout": 15}
+        )
             return response.text.strip().replace('*', '')
         finally:
             GEMINI_CONCURRENCY_LIMIT.release()
@@ -1877,6 +2277,38 @@ def call_gemini_with_circuit_breaker(prompt: str, user_id: str, user_city: str =
             ),
             "fallback" : True
         }
+
+def call_gemini_for_intent(prompt: str, user_id: str = "system", correlation_id: str = "N/A") -> str:
+    """
+    Lightweight Gemini call for intent classification.
+    Reuses circuit breaker + concurrency limit, but bypasses per-user quota
+    (intent classification is overhead, not user-facing AI usage).
+    
+    Returns raw text response string. On any failure, returns empty string
+    so the intent classifier falls back gracefully to 'unclear'.
+    """
+    def _call_api():
+        GEMINI_CONCURRENCY_LIMIT.acquire()
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.1,
+                },
+                request_options={"timeout": 10}
+            )
+            return response.text.strip()
+        finally:
+            GEMINI_CONCURRENCY_LIMIT.release()
+    
+    try:
+        result = gemini_circuit_breaker.call(_call_api)
+        safe_log_debug(f"[INTENT-GEMINI] ✅ {correlation_id}")
+        return result
+    except Exception as e:
+        safe_log_warning(f"[INTENT-GEMINI] Error: {e} | {correlation_id}")
+        return ""    
 
 # ============================================================================
 # FLASK ROUTES
@@ -2178,6 +2610,7 @@ def startup():
     # Start background services
     safe_log_info("[INIT] Loading properties from backend...")
     fetch_properties_from_backend()
+    _start_properties_auto_refresh(interval_seconds=300)  # Refresh every 5 min
     safe_log_info("[INIT] Starting webhook processor...")
     webhook_processor.start()
 
