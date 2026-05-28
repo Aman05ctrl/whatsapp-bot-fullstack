@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from typing import Optional
 from property_backend.app.database import get_db
 from property_backend.app.models.property import Client, Property, PropertyStatus
@@ -41,7 +42,10 @@ def get_all_properties(
     db: Session = Depends(get_db),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
-    status_filter: Optional[PropertyStatus] = None
+    status: Optional[PropertyStatus] = Query(None, alias="status"),
+    search: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query("created_at"),
+    sort_order: Optional[str] = Query("desc"),
 ):
     """
     Get all properties for the authenticated client
@@ -51,8 +55,30 @@ def get_all_properties(
         Property.status != PropertyStatus.INACTIVE
     )
     
-    if status_filter:
-        query = query.filter(Property.status == status_filter)
+    if status:
+        query = query.filter(Property.status == status)
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                Property.title.ilike(pattern),
+                Property.description.ilike(pattern),
+                Property.city.ilike(pattern),
+                Property.address.ilike(pattern),
+            )
+        )
+
+         # ---- ADD THIS BLOCK ----
+    sort_column_map = {
+        "created_at": Property.created_at,
+        "title": Property.title,
+    }
+    sort_column = sort_column_map.get(sort_by, Property.created_at)
+    if sort_order == "asc":
+        query = query.order_by(sort_column.asc())
+    else:
+        query = query.order_by(sort_column.desc())
+    # ---- END ADD ----
     
     total = query.count()
     properties = query.offset(skip).limit(limit).all()

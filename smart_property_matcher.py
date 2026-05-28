@@ -10,7 +10,7 @@ Handles complex matching scenarios with diplomatic responses:
 5. Type unavailable → redirect to alternatives
 6. Out of stock → graceful handling
 
-Author: Built for Aman Dominator's Sarah Bot
+Author: Built for Aman Dominator's Selvora Bot
 Version: 2.0 (Production - Smart Matching)
 """
 

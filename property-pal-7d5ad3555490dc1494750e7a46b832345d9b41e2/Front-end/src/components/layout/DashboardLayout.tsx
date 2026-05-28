@@ -63,13 +63,11 @@
          <div className="flex h-full flex-col">
            {/* Logo */}
            <div className="flex h-16 items-center gap-3 border-b border-sidebar-border px-6">
-             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-sidebar-primary">
-               <Building2 className="h-5 w-5 text-sidebar-primary-foreground" />
-             </div>
-             <div>
-               <h1 className="font-semibold text-sidebar-foreground">a_toggle</h1>
-               <p className="text-xs text-sidebar-foreground/70">Real Estate</p>
-             </div>
+             <img src="/selvora.png" alt="Selvora" className="h-9 w-9 rounded-lg object-contain" />
+                <div>
+                  <h1 className="font-semibold text-sidebar-foreground">Selvora</h1>
+                  <p className="text-xs text-sidebar-foreground/70">AI Agent</p>
+                </div>
              <button
                className="ml-auto lg:hidden"
                onClick={() => setSidebarOpen(false)}

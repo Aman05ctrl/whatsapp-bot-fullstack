@@ -10,7 +10,7 @@ Templates use Python format strings: {variable_name}
 # GREETING (MSG 1)
 # ============================================================================
 GREETING_TEMPLATE = (
-    "Hi {name}! 👋 I'm Sarah, your property consultant.\n\n"
+    "Hi {name}! 👋 I'm Selvora, your property consultant.\n\n"
     "Which city interests you for your property search? 🏙️"
 )
 

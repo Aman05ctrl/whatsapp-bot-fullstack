@@ -229,7 +229,10 @@ export default function Dashboard() {
                         <Cell key={i} fill={entry.color} />
                       ))}
                     </Pie>
-                    <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', color: 'hsl(var(--foreground))' }} />
+                    <Tooltip
+                        contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px' }}
+                        itemStyle={{ color: '#FFFFFF' }}
+                      />
                     <Legend formatter={(value) => <span className="text-xs text-foreground">{value}</span>} />
                   </PieChart>
                 </ResponsiveContainer>

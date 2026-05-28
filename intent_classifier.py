@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-INTENT_PROMPT_TEMPLATE = """You are an intent classifier for a real-estate WhatsApp bot named Sarah.
+INTENT_PROMPT_TEMPLATE = """You are an intent classifier for a real-estate WhatsApp bot named Selvora.
 Analyze the user's message in conversation context. Return ONLY a JSON object — NO other text, NO markdown, NO code fences.
 
 CONTEXT:

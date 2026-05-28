@@ -2047,7 +2047,7 @@ def get_smart_template_response(message: str, user_city: str, user_interest: str
                  'good evening', 'hii', 'hiii', 'helo', 'hola', 'namaste']
     if msg_lower in greetings or len(msg_lower) <= 3:
         conversation_state.update(user_id, 'greeted', 'yes')
-        return ("Hi there! 👋 I'm Sarah, your property consultant. "
+        return ("Hi there! 👋 I'm Selvora, your property consultant. "
                 "Which city are you interested in?\n\n"
                 "🏙️ Dubai (Marina, Downtown)\n"
                 "🌆 Abu Dhabi (Yas Island)\n"

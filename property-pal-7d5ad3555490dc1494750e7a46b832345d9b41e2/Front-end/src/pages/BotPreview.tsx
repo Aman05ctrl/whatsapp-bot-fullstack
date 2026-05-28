@@ -141,7 +141,7 @@ export default function BotPreview() {
               <div className="rounded-t-xl px-4 py-3 flex items-center gap-3" style={{ background: 'hsl(var(--primary) / 0.15)' }}>
                 <div className="h-8 w-8 rounded-full bg-primary/30 flex items-center justify-center"><MessageCircle className="h-4 w-4 text-primary" /></div>
                 <div>
-                  <p className="text-sm font-semibold">Property Bot</p>
+                  <p className="text-sm font-semibold">Property AI Agent </p>
                   <p className="text-[10px] text-muted-foreground">Online</p>
                 </div>
               </div>

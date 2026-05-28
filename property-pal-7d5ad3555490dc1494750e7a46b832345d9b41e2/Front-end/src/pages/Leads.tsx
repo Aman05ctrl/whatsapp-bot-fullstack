@@ -132,7 +132,7 @@ export default function Leads() {
     return leads.filter(l => {
       if (search) {
         const q = search.toLowerCase();
-        if (!l.name.toLowerCase().includes(q) && !l.phone.includes(q) && !l.email.toLowerCase().includes(q) && !l.city.toLowerCase().includes(q)) return false;
+        if (!(l.name || '').toLowerCase().includes(q) && !(l.phone || '').includes(q) && !(l.email || '').toLowerCase().includes(q) && !(l.city || '').toLowerCase().includes(q)) return false;
       }
       if (statusFilter !== 'all' && l.lead_status.toLowerCase() !== statusFilter.toLowerCase()) return false;
       if (budgetFilter !== 'all' && l.budget_category !== budgetFilter) return false;
@@ -193,12 +193,24 @@ export default function Leads() {
   };
 
   const exportToCSV = () => {
-    const headers = ['Name', 'Phone', 'Email', 'City', 'Interest', 'Score', 'Status', 'Budget', 'Follow Up', 'Agent Handover', 'Notes', 'Created'];
+    const headers = ['Created', 'Name', 'Country Code', 'Phone', 'Interest', 'Email', 'City', 'Last Updated', 'Lead Score', 'Lead Status', 'Follow-Up Due', 'Lead Summary', 'Budget Category', 'Agent Handover', 'Conversation Status', 'Fingerprint'];
     const rows = filteredLeads.map(l => [
-      l.name || '', l.phone || '', l.email || '', l.city || '',
-      l.interest || '', l.lead_score, l.lead_status || '', l.budget_category || '',
-      l.follow_up_due || '', l.agent_handover || '', l.notes || '',
-      new Date(l.created_at).toLocaleDateString()
+      l.created_at || '',
+      l.name || '',
+      l.country_code || '',
+      l.phone || '',
+      l.interest || '',
+      l.email || '',
+      l.city || '',
+      l.last_updated || '',
+      l.lead_score,
+      l.lead_status || '',
+      l.follow_up_due || '',
+      l.lead_summary || '',
+      l.budget_category || '',
+      l.agent_handover || '',
+      l.conversation_status || '',
+      l.user_fingerprint || '',
     ]);
     const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -302,10 +314,10 @@ export default function Leads() {
                 </TableHeader>
                 <TableBody>
                   {filteredLeads.map((lead, i) => (
-                    <TableRow key={i} className="hover:bg-primary/5 transition-colors">
+                       <TableRow key={lead.id} className="hover:bg-primary/5 transition-colors">
                       <TableCell className="text-muted-foreground text-xs">{i + 1}</TableCell>
                       <TableCell className="font-medium text-sm">{lead.name}</TableCell>
-                      <TableCell className="text-sm font-mono">{lead.country_code}{lead.phone}</TableCell>
+                      <TableCell className="text-sm font-mono">{lead.country_code || ''}{lead.phone || ''}</TableCell>
                       <TableCell className="text-sm max-w-[150px] truncate">{lead.interest}</TableCell>
                       <TableCell className="text-sm">{lead.city}</TableCell>
                       <TableCell><LeadScoreBadge score={lead.lead_score} /></TableCell>
@@ -409,7 +421,7 @@ export default function Leads() {
               <div className="space-y-4 pt-2">
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   {[
-                    ['Phone', `${selectedLead.country_code}${selectedLead.phone}`],
+                    ['Phone', `${selectedLead.country_code || ''}${selectedLead.phone || ''}`],
                     ['Email', selectedLead.email],
                     ['City', selectedLead.city],
                     ['Interest', selectedLead.interest],
@@ -440,19 +452,24 @@ export default function Leads() {
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" variant="outline" onClick={() => {
-                    const headers = ['Name', 'Phone', 'Email', 'City', 'Interest', 'Score', 'Status', 'Budget', 'Follow Up', 'Agent Handover', 'Notes', 'Created'];
-                    const values = [
-                      selectedLead.name || '',
-                      selectedLead.phone || '',
-                      selectedLead.email || '',
-                      selectedLead.city || '',
-                      selectedLead.interest || '',
-                      selectedLead.lead_score,
-                      selectedLead.lead_status || '',
-                      selectedLead.budget_category || '',
-                      selectedLead.follow_up_due || '',
-                      selectedLead.agent_handover || '',
-                      selectedLead.notes || '',
+                    const headers = ['Created', 'Name', 'Country Code', 'Phone', 'Interest', 'Email', 'City', 'Last Updated', 'Lead Score', 'Lead Status', 'Follow-Up Due', 'Lead Summary', 'Budget Category', 'Agent Handover', 'Conversation Status', 'Fingerprint'];
+                        const values = [
+                          selectedLead.created_at || '',
+                          selectedLead.name || '',
+                          selectedLead.country_code || '',
+                          selectedLead.phone || '',
+                          selectedLead.interest || '',
+                          selectedLead.email || '',
+                          selectedLead.city || '',
+                          selectedLead.last_updated || '',
+                          selectedLead.lead_score,
+                          selectedLead.lead_status || '',
+                          selectedLead.follow_up_due || '',
+                          selectedLead.lead_summary || '',
+                          selectedLead.budget_category || '',
+                          selectedLead.agent_handover || '',
+                          selectedLead.conversation_status || '',
+                          selectedLead.user_fingerprint || '',
                       new Date(selectedLead.created_at).toLocaleDateString(),
                     ];
                     const csv = [headers.join(','), values.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')].join('\n');

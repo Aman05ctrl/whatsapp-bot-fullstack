@@ -118,6 +118,10 @@
        setError('Title is required');
        return;
      }
+     if (!formData.property_type) {
+        setError('Property type is required');
+        return;
+     }
  
      setIsSubmitting(true);
  

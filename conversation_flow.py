@@ -9,7 +9,7 @@ NO MORE:
 - Repetitive questions (state tracks what's asked)
 - Hallucinations (validated inputs)
 
-Author: Built for Aman Dominator's Sarah Bot
+Author: Built for Aman Dominator's Selvora Bot
 Version: 1.0 (Production)
 """
 
@@ -1198,7 +1198,7 @@ class ConversationFlow:
             if itype.lower() in msg_lower:
                 return itype
         
-        # 2. Universal real-estate vocabulary — types Sarah should always RECOGNIZE
+        # 2. Universal real-estate vocabulary — types Selvora should always RECOGNIZE
         #    even if the dealer doesn't sell them. The handler decides what to say.
         universal_types = [
             'penthouse', 'townhouse', 'farmhouse',  # multi-word/longer first

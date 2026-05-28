@@ -87,7 +87,7 @@ export default function Analytics() {
           {[
             { label: 'Total Revenue', value: formatCurrency(kpis.totalRevenue), icon: DollarSign },
             { label: 'Avg Sale Price', value: formatCurrency(kpis.avgSalePrice), icon: TrendingUp },
-            { label: 'Conversion Rate', value: `${kpis.conversionRate}%`, icon: BarChart3 },
+            { label: 'Sell-Through Rate', value: `${kpis.conversionRate}%`, icon: BarChart3 },
             { label: 'Top City', value: kpis.topCity, icon: MapPin },
             { label: 'Total Leads', value: leads.length.toString(), icon: Home },
             { label: 'Total Conversations', value: logs.length.toString(), icon: BarChart3 },
@@ -109,11 +109,20 @@ export default function Analytics() {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={monthlyData}>
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
-                <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" tickFormatter={(v) => `$${(v/1000).toFixed(0)}K`} />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        stroke="hsl(var(--muted-foreground))"
+                        tickFormatter={(v) =>
+                          v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${(v / 1000).toFixed(0)}K`
+                        }
+                      />
                 <Tooltip
-                  contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', color: 'hsl(var(--foreground))' }}
-                  formatter={(v: number) => [formatCurrency(v), 'Revenue']}
-                />
+                    cursor={{ fill: 'transparent' }}
+                    contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px' }}
+                    itemStyle={{ color: '#FFFFFF' }}
+                    labelStyle={{ color: '#FFFFFF' }}
+                    formatter={(value: number) => [<span style={{ color: '#FFFFFF' }}>{formatCurrency(value)}</span>, 'Revenue']}
+                  />
                 <Bar dataKey="revenue" radius={[6, 6, 0, 0]} animationDuration={1000}>
                   {monthlyData.map((_, i) => (
                     <Cell key={i} fill="hsl(var(--primary))" fillOpacity={0.8} />
@@ -174,7 +183,13 @@ export default function Analytics() {
                 <BarChart data={typeData} layout="vertical">
                   <XAxis type="number" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
                   <YAxis dataKey="name" type="category" width={80} tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
-                  <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px', color: 'hsl(var(--foreground))' }} />
+                  <Tooltip
+                      cursor={{ fill: 'transparent' }}
+                      contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: '8px' }}
+                      itemStyle={{ color: '#FFFFFF' }}
+                      labelStyle={{ color: '#FFFFFF' }}
+                      formatter={(value: number) => [<span style={{ color: '#FFFFFF' }}>{value}</span>, 'Count']}
+                    />
                   <Bar dataKey="value" radius={[0, 6, 6, 0]} animationDuration={1000}>
                     {typeData.map((entry, i) => (
                       <Cell key={i} fill={entry.color} />

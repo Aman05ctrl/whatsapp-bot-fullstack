@@ -30,15 +30,29 @@ export default function Properties() {
   const currentPage = parseInt(searchParams.get('page') || '1');
   const searchQuery = searchParams.get('search') || '';
   const statusFilter = searchParams.get('status') || 'all';
+  const sortBy = searchParams.get('sort') || 'newest';
 
   const fetchProperties = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const params: Record<string, unknown> = { page: currentPage, size: 10 };
+      const PAGE_SIZE = 10;
+      const params: Record<string, unknown> = {
+        skip: (currentPage - 1) * PAGE_SIZE,
+        limit: PAGE_SIZE,
+      };
       if (searchQuery) params.search = searchQuery;
-      if (statusFilter === 'available') params.is_sold = false;
-      else if (statusFilter === 'sold') params.is_sold = true;
+      if (statusFilter === 'available') params.status = 'active';
+      else if (statusFilter === 'sold') params.status = 'sold';
+      const sortMap: Record<string, { sort_by: string; sort_order: string }> = {
+        newest: { sort_by: 'created_at', sort_order: 'desc' },
+        oldest: { sort_by: 'created_at', sort_order: 'asc' },
+        az:     { sort_by: 'title',      sort_order: 'asc'  },
+        za:     { sort_by: 'title',      sort_order: 'desc' },
+      };
+      const sort = sortMap[sortBy] || sortMap.newest;
+      params.sort_by = sort.sort_by;
+      params.sort_order = sort.sort_order;
       const response = await api.properties.list(params);
       setProperties(response.items || []);
       setTotalPages(response.pages || 1);
@@ -48,7 +62,7 @@ export default function Properties() {
     } finally {
       setIsLoading(false);
     }
-  }, [currentPage, searchQuery, statusFilter]);
+  }, [currentPage, searchQuery, statusFilter, sortBy]);
 
   useEffect(() => { fetchProperties(); }, [fetchProperties]);
 
@@ -79,18 +93,19 @@ export default function Properties() {
   return (
     <DashboardLayout>
       <div className="space-y-6 animate-fade-in">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="page-header text-3xl">Properties</h1>
-            <p className="text-muted-foreground text-sm mt-1">Manage your property listings</p>
-          </div>
-          <Link to="/properties/new">
-            <Button className="gap-2"><Plus className="h-4 w-4" />Add Property</Button>
-          </Link>
-        </div>
+        <div className="sticky top-16 z-20 -mx-4 -mt-4 lg:-mx-6 lg:-mt-6 bg-background px-4 pt-4 pb-4 lg:px-6 lg:pt-6 space-y-4 border-b border-border/40">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="page-header text-3xl">Properties</h1>
+              <p className="text-muted-foreground text-sm mt-1">Manage your property listings</p>
+            </div>
+            <Link to="/properties/new">
+              <Button className="gap-2"><Plus className="h-4 w-4" />Add Property</Button>
+            </Link>
+      </div>
 
-        {/* Filters */}
-        <Card className="card-elevated glow-border">
+    {/* Filters */}
+    <Card className="card-elevated glow-border">
           <CardContent className="p-4">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-1 gap-3">
@@ -106,6 +121,15 @@ export default function Properties() {
                     <SelectItem value="sold">Sold</SelectItem>
                   </SelectContent>
                 </Select>
+                <Select value={sortBy} onValueChange={(v) => updateFilter('sort', v)}>
+                  <SelectTrigger className="w-[160px]"><SelectValue placeholder="Sort" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="newest">Newest First</SelectItem>
+                    <SelectItem value="oldest">Oldest First</SelectItem>
+                    <SelectItem value="az">Name: A to Z</SelectItem>
+                    <SelectItem value="za">Name: Z to A</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="flex gap-1 border border-border rounded-lg p-1">
                 <Button variant={viewMode === 'table' ? 'secondary' : 'ghost'} size="icon" onClick={() => setViewMode('table')}><List className="h-4 w-4" /></Button>
@@ -114,6 +138,7 @@ export default function Properties() {
             </div>
           </CardContent>
         </Card>
+        </div>
 
         {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertDescription>{error}</AlertDescription></Alert>}
 
@@ -148,7 +173,7 @@ export default function Properties() {
                       <TableCell>
                         <div className="flex items-center gap-3">
                           <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center overflow-hidden shrink-0">
-                            {img ? <img src={img} alt={property.title} className="h-full w-full object-cover" /> : <Home className="h-5 w-5 text-muted-foreground" />}
+                            {img ? <img src={img} alt={property.title} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <Home className="h-5 w-5 text-muted-foreground" />}
                           </div>
                           <div>
                             <p className="font-medium text-sm">{property.title}</p>
@@ -190,7 +215,7 @@ export default function Properties() {
                 <Link key={property.id} to={`/properties/${property.id}`}>
                   <Card className="card-elevated overflow-hidden group cursor-pointer transition-transform duration-200 hover:scale-[1.02]">
                     <div className="aspect-video bg-muted flex items-center justify-center overflow-hidden">
-                      {img ? <img src={img} alt={property.title} className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-300" /> : <Home className="h-12 w-12 text-muted-foreground/20" />}
+                      {img ? <img src={img} alt={property.title} loading="lazy" decoding="async" className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-300" /> : <Home className="h-12 w-12 text-muted-foreground/20" />}
                     </div>
                     <CardContent className="p-4">
                       <div className="flex items-start justify-between gap-2">
